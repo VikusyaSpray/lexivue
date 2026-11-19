@@ -7,6 +7,7 @@ import { VideoStudyView } from './components/VideoStudyView';
 import { ReadingView } from './components/ReadingView';
 import { FlashcardsView } from './components/FlashcardsView';
 import { TranslationSheet } from './components/TranslationSheet';
+import { fetchTranscriptSmart, translateWordSmart } from './utils/clientApi';
 
 export function App() {
   const [activeTab, setActiveTab] = useState<ActiveTab>('video');
@@ -58,19 +59,15 @@ export function App() {
     setVideoError(null);
 
     try {
-      const res = await fetch(
-        `/api/transcript?url=${encodeURIComponent(urlOrId.trim())}`
-      );
-      const data = await res.json();
-      if (!res.ok) {
-        setVideoError(data?.error || 'Не вдалося завантажити субтитри для цього відео.');
-        setTranscript(null);
-      } else {
-        setTranscript(data);
-        setVideoError(null);
-      }
-    } catch {
-      setVideoError('Помилка зʼєднання із сервером. Перевірте інтернет і спробуйте ще раз.');
+      const data = await fetchTranscriptSmart(urlOrId);
+      setTranscript(data);
+      setVideoError(null);
+    } catch (err) {
+      const msg =
+        err instanceof Error && err.message
+          ? err.message
+          : 'Не вдалося завантажити субтитри для цього відео.';
+      setVideoError(msg);
       setTranscript(null);
     } finally {
       setVideoLoading(false);
@@ -100,22 +97,16 @@ export function App() {
       setTranslationData(null);
 
       try {
-        const params = new URLSearchParams({
-          word: cleanWord,
-          sentence: contextText,
-        });
-        const res = await fetch(`/api/translate?${params.toString()}`);
-        const data = await res.json();
+        const data = await translateWordSmart(cleanWord, contextText);
         if (reqId !== translateReqIdRef.current) return;
-
-        if (!res.ok) {
-          setTranslationError(data?.error || 'Не вдалося перекласти слово.');
-        } else {
-          setTranslationData(data);
-        }
-      } catch {
+        setTranslationData(data);
+      } catch (err) {
         if (reqId !== translateReqIdRef.current) return;
-        setTranslationError('Не вдалося отримати переклад. Перевірте підключення.');
+        const msg =
+          err instanceof Error && err.message
+            ? err.message
+            : 'Не вдалося отримати переклад. Перевірте підключення.';
+        setTranslationError(msg);
       } finally {
         if (reqId === translateReqIdRef.current) {
           setTranslationLoading(false);

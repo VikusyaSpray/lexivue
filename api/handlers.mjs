@@ -946,9 +946,22 @@ async function googleTranslateEnToUk(text, includeDict = false) {
   let url = `https://translate.googleapis.com/translate_a/single?${params.toString()}&dt=t`;
   if (includeDict) url += '&dt=bd';
 
-  const res = await fetchWithTimeout(url, 5000);
-  if (!res.ok) throw new Error('Translation API failed');
+  const res = await fetchWithTimeout(url, 4500, {
+    headers: {
+      'User-Agent':
+        'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/134.0.0.0 Safari/537.36',
+    },
+  });
+  if (!res.ok) throw new Error('Google Translate API failed');
   return res.json();
+}
+
+async function myMemoryTranslateEnToUk(text) {
+  const url = `https://api.mymemory.translated.net/get?q=${encodeURIComponent(text)}&langpair=en|uk`;
+  const res = await fetchWithTimeout(url, 4500);
+  if (!res.ok) return '';
+  const data = await res.json();
+  return String(data?.responseData?.translatedText || '').trim();
 }
 
 async function fetchDictionaryMeta(word) {
@@ -989,21 +1002,21 @@ export async function translateWord(rawWord, sentence = '') {
   let baseData = translateCache.get(lower);
 
   if (!baseData) {
-    const [gtData, dictMeta] = await Promise.all([
-      googleTranslateEnToUk(cleaned, true),
+    const [gtResult, dictMeta] = await Promise.all([
+      googleTranslateEnToUk(cleaned, true).catch(() => null),
       fetchDictionaryMeta(lower),
     ]);
 
-    const mainTranslation = Array.isArray(gtData?.[0])
-      ? gtData[0].map((part) => part?.[0] || '').join('').trim()
+    let mainTranslation = Array.isArray(gtResult?.[0])
+      ? gtResult[0].map((part) => part?.[0] || '').join('').trim()
       : '';
 
     const alternatives = [];
     let partOfSpeech = '';
     let partOfSpeechUk = '';
 
-    if (Array.isArray(gtData?.[1])) {
-      for (const group of gtData[1]) {
+    if (Array.isArray(gtResult?.[1])) {
+      for (const group of gtResult[1]) {
         const pos = String(group?.[0] || '').toLowerCase();
         if (!partOfSpeech && pos) {
           partOfSpeech = pos;
@@ -1023,10 +1036,21 @@ export async function translateWord(rawWord, sentence = '') {
       }
     }
 
+    if (!mainTranslation) {
+      mainTranslation = await myMemoryTranslateEnToUk(cleaned).catch(() => '');
+    }
+
+    if (!mainTranslation) {
+      return {
+        status: 502,
+        body: { error: 'Не вдалося перекласти слово. Спробуйте ще раз.' },
+      };
+    }
+
     baseData = {
       word: cleaned,
       normalized: lower,
-      translation: mainTranslation || cleaned,
+      translation: mainTranslation,
       alternatives,
       partOfSpeech,
       partOfSpeechUk,
@@ -1049,11 +1073,11 @@ export async function translateWord(rawWord, sentence = '') {
         sentenceTranslation = Array.isArray(sentData?.[0])
           ? sentData[0].map((part) => part?.[0] || '').join('').trim()
           : '';
-        if (sentenceTranslation) {
-          translateCache.set(sentKey, sentenceTranslation);
-        }
       } catch {
-        sentenceTranslation = '';
+        sentenceTranslation = await myMemoryTranslateEnToUk(trimmedSentence).catch(() => '');
+      }
+      if (sentenceTranslation) {
+        translateCache.set(sentKey, sentenceTranslation);
       }
     }
   }
