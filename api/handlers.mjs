@@ -53,6 +53,83 @@ function decodeHtmlEntities(text) {
     .trim();
 }
 
+function extractJsonArrayAt(str, keyToken) {
+  const idx = str.indexOf(keyToken);
+  if (idx === -1) return null;
+  const sub = str.slice(idx + keyToken.length);
+  if (sub[0] !== '[') return null;
+  let depth = 0;
+  let inString = false;
+  let escaped = false;
+  for (let i = 0; i < sub.length; i++) {
+    const ch = sub[i];
+    if (escaped) {
+      escaped = false;
+      continue;
+    }
+    if (ch === '\\' && inString) {
+      escaped = true;
+      continue;
+    }
+    if (ch === '"') {
+      inString = !inString;
+      continue;
+    }
+    if (!inString) {
+      if (ch === '[') depth++;
+      else if (ch === ']') {
+        depth--;
+        if (depth === 0) {
+          try {
+            return JSON.parse(sub.slice(0, i + 1));
+          } catch {
+            return null;
+          }
+        }
+      }
+    }
+  }
+  return null;
+}
+
+async function fetchWatchPagePlayerData(videoId) {
+  try {
+    const res = await fetchWithTimeout(`https://www.youtube.com/watch?v=${videoId}&hl=en`, 4500, {
+      headers: {
+        'User-Agent':
+          'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/134.0.0.0 Safari/537.36',
+        'Accept-Language': 'en-US,en;q=0.9',
+        Cookie: 'SOCS=CAESEwgDEgk0ODE3Nzk3MjQaAmVuIAEaBgiA_LyaBg',
+      },
+    });
+    if (!res.ok) return null;
+    const html = await res.text();
+    const tracks = extractJsonArrayAt(html, '"captionTracks":');
+    if (!tracks || tracks.length === 0) return null;
+
+    const titleMatch = html.match(/"videoDetails":\{.*?"title":"((?:[^"\\]|\\.)*)"/);
+    const authorMatch = html.match(/"videoDetails":\{.*?"author":"((?:[^"\\]|\\.)*)"/);
+    const lenMatch = html.match(/"videoDetails":\{.*?"lengthSeconds":"(\d+)"/);
+
+    const unescapeJsonStr = (s) => {
+      try {
+        return JSON.parse(`"${s}"`);
+      } catch {
+        return s;
+      }
+    };
+
+    return {
+      title: titleMatch ? unescapeJsonStr(titleMatch[1]) : 'YouTube Video',
+      author: authorMatch ? unescapeJsonStr(authorMatch[1]) : '',
+      lengthSeconds: lenMatch ? Number(lenMatch[1]) : 0,
+      tracks,
+    };
+  } catch {
+    return null;
+  }
+}
+
 async function fetchPlayerData(videoId) {
   const clients = [
     {
@@ -69,7 +146,7 @@ async function fetchPlayerData(videoId) {
 
   for (const client of clients) {
     try {
-      const res = await fetch('https://www.youtube.com/youtubei/v1/player', {
+      const res = await fetchWithTimeout('https://www.youtube.com/youtubei/v1/player', 3500, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -99,19 +176,12 @@ async function fetchPlayerData(videoId) {
           tracks,
         };
       }
-      if (data?.videoDetails?.title) {
-        return {
-          title: data.videoDetails.title,
-          author: data.videoDetails.author || '',
-          lengthSeconds: Number(data.videoDetails.lengthSeconds || 0),
-          tracks: [],
-        };
-      }
     } catch {
       // try next client
     }
   }
-  return null;
+
+  return fetchWatchPagePlayerData(videoId);
 }
 
 const WORD_REGEX = /[A-Za-z]+(?:['’-][A-Za-z]+)*/g;
@@ -434,36 +504,309 @@ function parseXmlCaptions(xml) {
   return segments;
 }
 
-export async function getYoutubeTranscript(urlOrId) {
-  const videoId = extractVideoId(urlOrId);
-  if (!videoId) {
-    return { status: 400, body: { error: 'Некоректне посилання на YouTube. Перевірте URL і спробуйте ще раз.' } };
+function parseVttTimestamp(raw) {
+  const parts = raw.trim().split(':');
+  if (parts.length === 3) {
+    return Number(parts[0]) * 3600 + Number(parts[1]) * 60 + Number(parts[2]);
+  }
+  if (parts.length === 2) {
+    return Number(parts[0]) * 60 + Number(parts[1]);
+  }
+  return Number(raw) || 0;
+}
+
+function extractInlineVttWordTimings(line, cueStart, cueEnd, cleanText) {
+  const targetSpecs = extractWordSpecs(cleanText);
+  if (targetSpecs.length === 0) return [];
+
+  // Parse segments separated by <HH:MM:SS.mmm> tags
+  const tagRegex = /<(\d{2}:\d{2}:\d{2}\.\d{3})>/g;
+  const rawWordStarts = [];
+  let lastIdx = 0;
+  let currentTime = cueStart;
+  let match;
+
+  const pushChunk = (chunkText, t) => {
+    const plain = decodeHtmlEntities(chunkText.replace(/<[^>]+>/g, ''));
+    if (!plain) return;
+    const words = extractWordSpecs(plain);
+    for (let i = 0; i < words.length; i++) {
+      rawWordStarts.push(t + i * 0.14);
+    }
+  };
+
+  while ((match = tagRegex.exec(line)) !== null) {
+    pushChunk(line.slice(lastIdx, match.index), currentTime);
+    currentTime = parseVttTimestamp(match[1]);
+    lastIdx = match.index + match[0].length;
+  }
+  pushChunk(line.slice(lastIdx), currentTime);
+
+  if (rawWordStarts.length !== targetSpecs.length) {
+    return buildWeightedTimings(cleanText, cueStart, cueEnd);
   }
 
-  if (transcriptCache.has(videoId)) {
-    return { status: 200, body: transcriptCache.get(videoId) };
-  }
-
-  const playerData = await fetchPlayerData(videoId);
-  if (!playerData) {
+  return rawWordStarts.map((wStart, idx) => {
+    const nextT = idx < rawWordStarts.length - 1 ? rawWordStarts[idx + 1] : cueEnd;
+    const end = Math.max(wStart + 0.07, Math.min(cueEnd, nextT));
     return {
-      status: 404,
-      body: { error: 'Не вдалося завантажити дані відео з YouTube. Перевірте посилання або спробуйте інше відео.' },
+      start: Number(wStart.toFixed(3)),
+      end: Number(end.toFixed(3)),
     };
+  });
+}
+
+function parseVttCaptions(vttText) {
+  const blocks = String(vttText || '')
+    .replace(/\r\n/g, '\n')
+    .split(/\n{2,}/);
+
+  const segments = [];
+
+  for (const block of blocks) {
+    const lines = block
+      .split('\n')
+      .map((l) => l.trim())
+      .filter(Boolean);
+    if (lines.length < 2) continue;
+
+    const tsIdx = lines.findIndex((l) => l.includes('-->'));
+    if (tsIdx === -1) continue;
+
+    const tsLine = lines[tsIdx];
+    const tsMatch = tsLine.match(
+      /(\d{1,2}:\d{2}(?::\d{2})?\.\d{3})\s*-->\s*(\d{1,2}:\d{2}(?::\d{2})?\.\d{3})/
+    );
+    if (!tsMatch) continue;
+
+    const start = parseVttTimestamp(tsMatch[1]);
+    const end = parseVttTimestamp(tsMatch[2]);
+    // Skip 10ms YouTube rolling transition cues
+    if (end - start <= 0.05) continue;
+
+    const contentLines = lines.slice(tsIdx + 1);
+    const inlineTimedLine = contentLines.find((l) => /<\d{2}:\d{2}:\d{2}\.\d{3}>/.test(l));
+
+    let text = '';
+    let wordTimings = [];
+
+    if (inlineTimedLine) {
+      text = decodeHtmlEntities(inlineTimedLine.replace(/<[^>]+>/g, ''));
+      if (!text) continue;
+      wordTimings = extractInlineVttWordTimings(inlineTimedLine, start, end, text);
+    } else {
+      const cleanedLines = contentLines
+        .map((l) => decodeHtmlEntities(l.replace(/<[^>]+>/g, '')))
+        .filter(Boolean);
+      if (cleanedLines.length === 0) continue;
+
+      // Avoid repeating the previous rolling line
+      const prevText = segments[segments.length - 1]?.text || '';
+      const filtered =
+        cleanedLines.length > 1 && prevText && cleanedLines[0] === prevText
+          ? cleanedLines.slice(1)
+          : cleanedLines;
+
+      text = filtered.join(' ').replace(/\s+/g, ' ').trim();
+      if (!text) continue;
+      wordTimings = buildWeightedTimings(text, start, end);
+    }
+
+    if (segments.length > 0 && segments[segments.length - 1].text === text) {
+      continue;
+    }
+
+    segments.push({
+      id: segments.length,
+      start: Number(start.toFixed(2)),
+      end: Number(end.toFixed(2)),
+      text,
+      wordTimings,
+    });
+  }
+
+  // Merge tiny 1-3 word rolling fragments smoothly
+  const merged = [];
+  for (const seg of segments) {
+    const prev = merged[merged.length - 1];
+    const prevWords = prev ? prev.text.split(' ').length : 0;
+    const curWords = seg.text.split(' ').length;
+    const gap = prev ? seg.start - prev.end : 99;
+    const prevEndsSentence = prev ? /[.!?]$/.test(prev.text) : true;
+
+    if (
+      prev &&
+      !prevEndsSentence &&
+      gap < 0.8 &&
+      prevWords + curWords <= 14 &&
+      seg.end - prev.start <= 6.5 &&
+      (prevWords <= 4 || curWords <= 3)
+    ) {
+      prev.text = `${prev.text} ${seg.text}`;
+      prev.end = seg.end;
+      prev.wordTimings = [...(prev.wordTimings || []), ...(seg.wordTimings || [])];
+    } else {
+      merged.push({ ...seg, id: merged.length });
+    }
+  }
+
+  return merged.map((seg, idx) => ({ ...seg, id: idx }));
+}
+
+async function fetchOembedMeta(videoId) {
+  try {
+    const res = await fetchWithTimeout(
+      `https://www.youtube.com/oembed?url=https://www.youtube.com/watch?v=${videoId}&format=json`,
+      3000
+    );
+    if (!res.ok) return { title: 'YouTube Video', author: '' };
+    const data = await res.json();
+    return {
+      title: data?.title || 'YouTube Video',
+      author: data?.author_name || '',
+    };
+  } catch {
+    return { title: 'YouTube Video', author: '' };
+  }
+}
+
+let invidiousHostsCache = {
+  hosts: ['https://yt.chocolatemoo53.com', 'https://inv.nadeko.net'],
+  fetchedAt: 0,
+};
+
+async function getInvidiousHosts() {
+  const now = Date.now();
+  if (now - invidiousHostsCache.fetchedAt < 10 * 60 * 1000) {
+    return invidiousHostsCache.hosts;
+  }
+  const defaults = ['https://yt.chocolatemoo53.com', 'https://inv.nadeko.net'];
+  try {
+    const res = await fetchWithTimeout('https://api.invidious.io/instances.json', 2500);
+    if (res.ok) {
+      const list = await res.json();
+      const dynamic = list
+        .filter(([, info]) => info?.api && info?.type === 'https' && info?.uri)
+        .map(([, info]) => String(info.uri).replace(/\/$/, ''));
+      const unique = [...new Set([...defaults, ...dynamic])].slice(0, 6);
+      invidiousHostsCache = { hosts: unique, fetchedAt: now };
+      return unique;
+    }
+  } catch {
+    // keep defaults
+  }
+  invidiousHostsCache.fetchedAt = now;
+  return defaults;
+}
+
+async function fetchViaInvidious(videoId) {
+  const [hosts, meta] = await Promise.all([getInvidiousHosts(), fetchOembedMeta(videoId)]);
+
+  for (const host of hosts) {
+    try {
+      const listRes = await fetchWithTimeout(`${host}/api/v1/captions/${videoId}`, 4000);
+      if (!listRes.ok) continue;
+      const listData = await listRes.json();
+      const captions = Array.isArray(listData?.captions) ? listData.captions : [];
+      if (captions.length === 0) continue;
+
+      // Build ordered candidate list: manual English -> auto-generated English -> any English -> first available
+      const isAuto = (c) => String(c.label || '').toLowerCase().includes('auto');
+      const candidates = [
+        ...captions.filter((c) => c.languageCode === 'en' && !isAuto(c)),
+        ...captions.filter((c) => c.languageCode?.startsWith('en') && c.languageCode !== 'en' && !isAuto(c)),
+        ...captions.filter((c) => c.languageCode === 'en' && isAuto(c)),
+        ...captions.filter((c) => c.languageCode?.startsWith('en') && c.languageCode !== 'en' && isAuto(c)),
+        ...captions.slice(0, 1),
+      ].filter((c, i, arr) => c?.url && arr.findIndex((x) => x.url === c.url) === i);
+
+      for (const chosen of candidates) {
+        try {
+          const vttUrl = chosen.url.startsWith('http') ? chosen.url : `${host}${chosen.url}`;
+          const vttRes = await fetchWithTimeout(vttUrl, 6000);
+          if (!vttRes.ok) continue;
+          const vttText = await vttRes.text();
+          if (!vttText || vttText.length < 20) continue;
+
+          const segments = parseVttCaptions(vttText);
+          if (segments.length === 0) continue;
+
+          return {
+            videoId,
+            title: meta.title,
+            author: meta.author,
+            lengthSeconds: 0,
+            language: chosen.languageCode || 'en',
+            isAutoGenerated: isAuto(chosen),
+            segments,
+          };
+        } catch {
+          // try next candidate
+        }
+      }
+    } catch {
+      // try next host
+    }
+  }
+  return null;
+}
+
+async function fetchViaSupadata(videoId) {
+  const apiKey = process.env.SUPADATA_API_KEY;
+  if (!apiKey) return null;
+
+  try {
+    const [res, meta] = await Promise.all([
+      fetchWithTimeout(
+        `https://api.supadata.ai/v1/youtube/transcript?videoId=${videoId}&lang=en`,
+        5000,
+        { headers: { 'x-api-key': apiKey } }
+      ),
+      fetchOembedMeta(videoId),
+    ]);
+    if (!res.ok) return null;
+    const data = await res.json();
+    const content = Array.isArray(data?.content) ? data.content : [];
+    if (content.length === 0) return null;
+
+    const segments = content
+      .map((item, idx) => {
+        const start = Number(((item.offset || 0) / 1000).toFixed(2));
+        const end = Number((((item.offset || 0) + (item.duration || 2500)) / 1000).toFixed(2));
+        const text = decodeHtmlEntities(String(item.text || ''));
+        if (!text) return null;
+        return {
+          id: idx,
+          start,
+          end,
+          text,
+          wordTimings: buildWeightedTimings(text, start, end),
+        };
+      })
+      .filter(Boolean);
+
+    if (segments.length === 0) return null;
+    return {
+      videoId,
+      title: meta.title,
+      author: meta.author,
+      lengthSeconds: 0,
+      language: data.lang || 'en',
+      isAutoGenerated: false,
+      segments,
+    };
+  } catch {
+    return null;
+  }
+}
+
+async function fetchDirectYoutubeTranscript(videoId) {
+  const playerData = await fetchPlayerData(videoId);
+  if (!playerData || !playerData.tracks || playerData.tracks.length === 0) {
+    return null;
   }
 
   const { title, author, lengthSeconds, tracks } = playerData;
-  if (!tracks || tracks.length === 0) {
-    return {
-      status: 404,
-      body: {
-        error: 'У цього відео немає доступних субтитрів на YouTube. Ви можете обрати інше відео або вставити текст у вкладці «Читати».',
-        videoId,
-        title,
-        author,
-      },
-    };
-  }
 
   // Pick manual English first, then any English (incl. auto-generated), then first available
   const chosenTrack =
@@ -473,7 +816,6 @@ export async function getYoutubeTranscript(urlOrId) {
     tracks.find((t) => t.languageCode?.startsWith('en')) ||
     tracks[0];
 
-  // If chosen track is manual, also look for English ASR track for exact word-level speech sync
   const asrTrack =
     chosenTrack.kind !== 'asr'
       ? tracks.find((t) => t.languageCode?.startsWith('en') && t.kind === 'asr')
@@ -491,7 +833,7 @@ export async function getYoutubeTranscript(urlOrId) {
         try {
           const asrUrl = new URL(asrTrack.baseUrl);
           asrUrl.searchParams.set('fmt', 'json3');
-          const res = await fetchWithTimeout(asrUrl.toString(), 4000);
+          const res = await fetchWithTimeout(asrUrl.toString(), 4000, { headers: fetchHeaders });
           if (!res.ok) return null;
           const json = await res.json();
           return extractAsrWordStream(json);
@@ -502,18 +844,15 @@ export async function getYoutubeTranscript(urlOrId) {
     : Promise.resolve(null);
 
   const [capRes, asrWordStream] = await Promise.all([
-    fetch(captionUrl.toString(), { headers: fetchHeaders }),
+    fetchWithTimeout(captionUrl.toString(), 4500, { headers: fetchHeaders }),
     asrPromise,
   ]);
 
-  if (!capRes.ok) {
-    return {
-      status: 502,
-      body: { error: 'Не вдалося завантажити файл субтитрів із YouTube. Спробуйте ще раз.' },
-    };
-  }
+  if (!capRes.ok) return null;
 
   const rawText = await capRes.text();
+  if (!rawText || rawText.length < 10) return null;
+
   let segments = [];
   try {
     const json = JSON.parse(rawText);
@@ -525,18 +864,13 @@ export async function getYoutubeTranscript(urlOrId) {
     }));
   }
 
-  if (segments.length === 0) {
-    return {
-      status: 404,
-      body: { error: 'Субтитри порожні або не підтримуються. Спробуйте інше відео.' },
-    };
-  }
+  if (segments.length === 0) return null;
 
   if (asrWordStream && asrWordStream.length > 0) {
     segments = alignSegmentsWithAsr(segments, asrWordStream);
   }
 
-  const payload = {
+  return {
     videoId,
     title,
     author,
@@ -545,16 +879,57 @@ export async function getYoutubeTranscript(urlOrId) {
     isAutoGenerated: chosenTrack.kind === 'asr',
     segments,
   };
+}
+
+export async function getYoutubeTranscript(urlOrId) {
+  const videoId = extractVideoId(urlOrId);
+  if (!videoId) {
+    return { status: 400, body: { error: 'Некоректне посилання на YouTube. Перевірте URL і спробуйте ще раз.' } };
+  }
+
+  if (transcriptCache.has(videoId)) {
+    return { status: 200, body: transcriptCache.get(videoId) };
+  }
+
+  let payload = null;
+
+  if (process.env.VERCEL) {
+    // On cloud/Vercel IPs, race direct YouTube and Invidious fallback in parallel for fast response
+    const [directRes, invRes] = await Promise.all([
+      fetchDirectYoutubeTranscript(videoId).catch(() => null),
+      fetchViaInvidious(videoId).catch(() => null),
+    ]);
+    payload = directRes || invRes;
+  } else {
+    payload = await fetchDirectYoutubeTranscript(videoId).catch(() => null);
+    if (!payload) {
+      payload = await fetchViaInvidious(videoId).catch(() => null);
+    }
+  }
+
+  if (!payload) {
+    payload = await fetchViaSupadata(videoId).catch(() => null);
+  }
+
+  if (!payload) {
+    return {
+      status: 404,
+      body: {
+        error:
+          'Не вдалося завантажити субтитри з YouTube для цього відео. Перевірте, чи є в нього субтитри, або спробуйте інше відео.',
+      },
+    };
+  }
 
   transcriptCache.set(videoId, payload);
   return { status: 200, body: payload };
 }
 
-async function fetchWithTimeout(url, timeoutMs = 3000) {
+async function fetchWithTimeout(url, timeoutMs = 3000, options = {}) {
   const controller = new AbortController();
   const id = setTimeout(() => controller.abort(), timeoutMs);
   try {
-    const res = await fetch(url, { signal: controller.signal });
+    const res = await fetch(url, { ...options, signal: controller.signal });
     return res;
   } finally {
     clearTimeout(id);
