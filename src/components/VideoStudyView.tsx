@@ -11,7 +11,7 @@ import {
 } from 'lucide-react';
 import { VideoTranscript } from '../types';
 import { PRESET_VIDEOS } from '../data/presets';
-import { formatTime } from '../utils/text';
+import { formatTime, buildContextSentenceAroundSegment } from '../utils/text';
 import { YouTubePlayer, YouTubePlayerHandle } from './YouTubePlayer';
 import { InteractiveText } from './InteractiveText';
 
@@ -125,6 +125,19 @@ export const VideoStudyView: React.FC<VideoStudyViewProps> = ({
     }
     return latest;
   }, [activeSegment, currentTime]);
+
+  const handleSegmentWordClick = (
+    segIndex: number,
+    word: string,
+    fallbackText: string,
+    wordIdx?: number
+  ) => {
+    const context =
+      transcript && segIndex >= 0
+        ? buildContextSentenceAroundSegment(transcript.segments, segIndex, word, wordIdx)
+        : fallbackText;
+    onWordClick(word, context || fallbackText);
+  };
 
   return (
     <section className="page-section">
@@ -246,7 +259,9 @@ export const VideoStudyView: React.FC<VideoStudyViewProps> = ({
                       savedWords={savedWords}
                       selectedWord={selectedWord}
                       activeWordIndex={activeWordIndex}
-                      onWordClick={onWordClick}
+                      onWordClick={(word, segText, wordIdx) =>
+                        handleSegmentWordClick(activeIndex, word, segText, wordIdx)
+                      }
                     />
                   ) : (
                     <span className="live-caption-placeholder">
@@ -330,7 +345,9 @@ export const VideoStudyView: React.FC<VideoStudyViewProps> = ({
                         savedWords={savedWords}
                         selectedWord={selectedWord}
                         activeWordIndex={isActive ? activeWordIndex : null}
-                        onWordClick={onWordClick}
+                        onWordClick={(word, segText, wordIdx) =>
+                          handleSegmentWordClick(idx, word, segText, wordIdx)
+                        }
                       />
                     </div>
                   </div>

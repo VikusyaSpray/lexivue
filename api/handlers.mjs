@@ -1,21 +1,60 @@
-const transcriptCache = new Map();
-const translateCache = new Map();
+import { translateWordEnhanced } from './translator.mjs';
 
-const POS_UK = {
-  noun: 'іменник',
-  verb: 'дієслово',
-  adjective: 'прикметник',
-  adverb: 'прислівник',
-  pronoun: 'займенник',
-  preposition: 'прийменник',
-  conjunction: 'сполучник',
-  interjection: 'вигук',
-  exclamation: 'вигук',
-  article: 'артикль',
-  determiner: 'детермінатив',
-  abbreviation: 'скорочення',
-  auxiliary: 'допоміжне дієслово',
-};
+const transcriptCache = new Map();
+
+// Words that strongly indicate a phrase/idiom continues onto the next subtitle cue
+const DANGLING_END_WORDS = new Set([
+  'a', 'an', 'the', 'to', 'of', 'in', 'on', 'at', 'for', 'with', 'from', 'by', 'as',
+  'into', 'onto', 'about', 'up', 'out', 'off', 'over', 'through', 'under', 'than',
+  'and', 'or', 'but', 'that', 'which', 'who', 'whose', 'where', 'when', 'while',
+  'is', 'are', 'was', 'were', 'be', 'been', 'being', 'have', 'has', 'had',
+  'do', 'does', 'did', 'will', 'would', 'can', 'could', 'should', 'must', 'may', 'might',
+  'not', "don't", "doesn't", "didn't", "won't", "can't", "couldn't", "shouldn't",
+  'my', 'your', 'his', 'her', 'its', 'our', 'their', 'this', 'these', 'those',
+  'very', 'so', 'too', 'quite', 'pretty', 'kind', 'sort', 'no', 'matter',
+  'take', 'takes', 'took', 'make', 'makes', 'made', 'give', 'gives', 'gave',
+  'get', 'gets', 'got', 'put', 'set', 'go', 'goes', 'went', 'come', 'comes', 'came',
+  'look', 'looks', 'looked', 'turn', 'turns', 'turned', 'break', 'breaks', 'broke',
+  'figure', 'figures', 'figured', 'end', 'ends', 'ended', 'keep', 'keeps', 'kept',
+  'bring', 'carry', 'hold', 'pick', 'run', 'work', 'check', 'hang', 'point', 'find',
+  'catch', 'show', 'grow', 'wake', 'call', 'cut', 'pay', 'fall', 'deal', 'watch',
+]);
+
+function endsWithDanglingWord(text) {
+  const trimmed = String(text || '').trim();
+  if (!trimmed || /[.!?,;:]$/.test(trimmed)) return false;
+  const lastToken = trimmed.split(/\s+/).pop() || '';
+  const norm = lastToken.replace(/’/g, "'").replace(/^[^a-zA-Z']+|[^a-zA-Z']+$/g, '').toLowerCase();
+  return DANGLING_END_WORDS.has(norm);
+}
+
+function mergeSubtitleFragments(segments) {
+  const merged = [];
+  for (const seg of segments) {
+    const prev = merged[merged.length - 1];
+    const prevWords = prev ? prev.text.split(/\s+/).length : 0;
+    const curWords = seg.text.split(/\s+/).length;
+    const gap = prev ? seg.start - prev.end : 99;
+    const prevEndsSentence = prev ? /[.!?]["'”)\]]*$/.test(prev.text.trim()) : true;
+    const danglingSplit = prev ? endsWithDanglingWord(prev.text) : false;
+
+    if (
+      prev &&
+      !prevEndsSentence &&
+      gap < 0.75 &&
+      prevWords + curWords <= 15 &&
+      seg.end - prev.start <= 6.8 &&
+      (prevWords <= 4 || curWords <= 3 || danglingSplit)
+    ) {
+      prev.text = `${prev.text} ${seg.text}`;
+      prev.end = seg.end;
+      prev.wordTimings = [...(prev.wordTimings || []), ...(seg.wordTimings || [])];
+    } else {
+      merged.push({ ...seg, id: merged.length });
+    }
+  }
+  return merged.map((seg, idx) => ({ ...seg, id: idx }));
+}
 
 export function extractVideoId(input = '') {
   const trimmed = String(input).trim();
@@ -438,32 +477,7 @@ function parseJson3Captions(json) {
     });
   }
 
-  // Merge very tiny single-word or 1-2 word ASR fragments into natural readable cues
-  const merged = [];
-  for (const seg of segments) {
-    const prev = merged[merged.length - 1];
-    const prevWords = prev ? prev.text.split(' ').length : 0;
-    const curWords = seg.text.split(' ').length;
-    const gap = prev ? seg.start - prev.end : 99;
-    const prevEndsSentence = prev ? /[.!?]$/.test(prev.text) : true;
-
-    if (
-      prev &&
-      !prevEndsSentence &&
-      gap < 0.8 &&
-      prevWords + curWords <= 14 &&
-      seg.end - prev.start <= 6.5 &&
-      (prevWords <= 4 || curWords <= 3)
-    ) {
-      prev.text = `${prev.text} ${seg.text}`;
-      prev.end = seg.end;
-      prev.wordTimings = [...(prev.wordTimings || []), ...(seg.wordTimings || [])];
-    } else {
-      merged.push({ ...seg, id: merged.length });
-    }
-  }
-
-  return merged.map((seg, idx) => ({ ...seg, id: idx }));
+  return mergeSubtitleFragments(segments);
 }
 
 function parseXmlCaptions(xml) {
@@ -625,32 +639,7 @@ function parseVttCaptions(vttText) {
     });
   }
 
-  // Merge tiny 1-3 word rolling fragments smoothly
-  const merged = [];
-  for (const seg of segments) {
-    const prev = merged[merged.length - 1];
-    const prevWords = prev ? prev.text.split(' ').length : 0;
-    const curWords = seg.text.split(' ').length;
-    const gap = prev ? seg.start - prev.end : 99;
-    const prevEndsSentence = prev ? /[.!?]$/.test(prev.text) : true;
-
-    if (
-      prev &&
-      !prevEndsSentence &&
-      gap < 0.8 &&
-      prevWords + curWords <= 14 &&
-      seg.end - prev.start <= 6.5 &&
-      (prevWords <= 4 || curWords <= 3)
-    ) {
-      prev.text = `${prev.text} ${seg.text}`;
-      prev.end = seg.end;
-      prev.wordTimings = [...(prev.wordTimings || []), ...(seg.wordTimings || [])];
-    } else {
-      merged.push({ ...seg, id: merged.length });
-    }
-  }
-
-  return merged.map((seg, idx) => ({ ...seg, id: idx }));
+  return mergeSubtitleFragments(segments);
 }
 
 async function fetchOembedMeta(videoId) {
@@ -936,161 +925,8 @@ async function fetchWithTimeout(url, timeoutMs = 3000, options = {}) {
   }
 }
 
-async function googleTranslateEnToUk(text, includeDict = false) {
-  const params = new URLSearchParams({
-    client: 'gtx',
-    sl: 'en',
-    tl: 'uk',
-    q: text,
-  });
-  let url = `https://translate.googleapis.com/translate_a/single?${params.toString()}&dt=t`;
-  if (includeDict) url += '&dt=bd';
-
-  const res = await fetchWithTimeout(url, 4500, {
-    headers: {
-      'User-Agent':
-        'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/134.0.0.0 Safari/537.36',
-    },
-  });
-  if (!res.ok) throw new Error('Google Translate API failed');
-  return res.json();
-}
-
-async function myMemoryTranslateEnToUk(text) {
-  const url = `https://api.mymemory.translated.net/get?q=${encodeURIComponent(text)}&langpair=en|uk`;
-  const res = await fetchWithTimeout(url, 4500);
-  if (!res.ok) return '';
-  const data = await res.json();
-  return String(data?.responseData?.translatedText || '').trim();
-}
-
-async function fetchDictionaryMeta(word) {
-  try {
-    const res = await fetchWithTimeout(
-      `https://api.dictionaryapi.dev/api/v2/entries/en/${encodeURIComponent(word)}`,
-      2200
-    );
-    if (!res.ok) return { phonetic: '', audio: '' };
-    const data = await res.json();
-    const entry = Array.isArray(data) ? data[0] : null;
-    if (!entry) return { phonetic: '', audio: '' };
-
-    let phonetic = entry.phonetic || '';
-    let audio = '';
-    if (Array.isArray(entry.phonetics)) {
-      for (const p of entry.phonetics) {
-        if (!phonetic && p.text) phonetic = p.text;
-        if (!audio && p.audio) audio = p.audio;
-      }
-    }
-    return { phonetic, audio };
-  } catch {
-    return { phonetic: '', audio: '' };
-  }
-}
-
 export async function translateWord(rawWord, sentence = '') {
-  const cleaned = String(rawWord || '')
-    .trim()
-    .replace(/^[^a-zA-Z'-]+|[^a-zA-Z'-]+$/g, '');
-
-  if (!cleaned) {
-    return { status: 400, body: { error: 'Слово не вказано.' } };
-  }
-
-  const lower = cleaned.toLowerCase();
-  let baseData = translateCache.get(lower);
-
-  if (!baseData) {
-    const [gtResult, dictMeta] = await Promise.all([
-      googleTranslateEnToUk(cleaned, true).catch(() => null),
-      fetchDictionaryMeta(lower),
-    ]);
-
-    let mainTranslation = Array.isArray(gtResult?.[0])
-      ? gtResult[0].map((part) => part?.[0] || '').join('').trim()
-      : '';
-
-    const alternatives = [];
-    let partOfSpeech = '';
-    let partOfSpeechUk = '';
-
-    if (Array.isArray(gtResult?.[1])) {
-      for (const group of gtResult[1]) {
-        const pos = String(group?.[0] || '').toLowerCase();
-        if (!partOfSpeech && pos) {
-          partOfSpeech = pos;
-          partOfSpeechUk = POS_UK[pos] || pos;
-        }
-        const terms = Array.isArray(group?.[1]) ? group[1] : [];
-        for (const term of terms) {
-          if (
-            typeof term === 'string' &&
-            term.toLowerCase() !== mainTranslation.toLowerCase() &&
-            !alternatives.includes(term) &&
-            alternatives.length < 5
-          ) {
-            alternatives.push(term);
-          }
-        }
-      }
-    }
-
-    if (!mainTranslation) {
-      mainTranslation = await myMemoryTranslateEnToUk(cleaned).catch(() => '');
-    }
-
-    if (!mainTranslation) {
-      return {
-        status: 502,
-        body: { error: 'Не вдалося перекласти слово. Спробуйте ще раз.' },
-      };
-    }
-
-    baseData = {
-      word: cleaned,
-      normalized: lower,
-      translation: mainTranslation,
-      alternatives,
-      partOfSpeech,
-      partOfSpeechUk,
-      phonetic: dictMeta.phonetic,
-      audio: dictMeta.audio,
-    };
-
-    translateCache.set(lower, baseData);
-  }
-
-  let sentenceTranslation = '';
-  const trimmedSentence = String(sentence || '').trim();
-  if (trimmedSentence && trimmedSentence.length <= 400) {
-    const sentKey = `sent:${trimmedSentence}`;
-    if (translateCache.has(sentKey)) {
-      sentenceTranslation = translateCache.get(sentKey);
-    } else {
-      try {
-        const sentData = await googleTranslateEnToUk(trimmedSentence, false);
-        sentenceTranslation = Array.isArray(sentData?.[0])
-          ? sentData[0].map((part) => part?.[0] || '').join('').trim()
-          : '';
-      } catch {
-        sentenceTranslation = await myMemoryTranslateEnToUk(trimmedSentence).catch(() => '');
-      }
-      if (sentenceTranslation) {
-        translateCache.set(sentKey, sentenceTranslation);
-      }
-    }
-  }
-
-  return {
-    status: 200,
-    body: {
-      ...baseData,
-      word: cleaned,
-      sentence: trimmedSentence,
-      sentenceTranslation,
-    },
-  };
+  return translateWordEnhanced(rawWord, sentence);
 }
 
 export async function handleApiRequest(req, res) {

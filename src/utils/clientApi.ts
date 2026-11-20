@@ -234,21 +234,50 @@ function parseVttCaptions(vttText: string): SubtitleSegment[] {
     });
   }
 
+const DANGLING_END_WORDS = new Set([
+  'a', 'an', 'the', 'to', 'of', 'in', 'on', 'at', 'for', 'with', 'from', 'by', 'as',
+  'into', 'onto', 'about', 'up', 'out', 'off', 'over', 'through', 'under', 'than',
+  'and', 'or', 'but', 'that', 'which', 'who', 'whose', 'where', 'when', 'while',
+  'is', 'are', 'was', 'were', 'be', 'been', 'being', 'have', 'has', 'had',
+  'do', 'does', 'did', 'will', 'would', 'can', 'could', 'should', 'must', 'may', 'might',
+  'not', "don't", "doesn't", "didn't", "won't", "can't", "couldn't", "shouldn't",
+  'my', 'your', 'his', 'her', 'its', 'our', 'their', 'this', 'these', 'those',
+  'very', 'so', 'too', 'quite', 'pretty', 'kind', 'sort', 'no', 'matter',
+  'take', 'takes', 'took', 'make', 'makes', 'made', 'give', 'gives', 'gave',
+  'get', 'gets', 'got', 'put', 'set', 'go', 'goes', 'went', 'come', 'comes', 'came',
+  'look', 'looks', 'looked', 'turn', 'turns', 'turned', 'break', 'breaks', 'broke',
+  'figure', 'figures', 'figured', 'end', 'ends', 'ended', 'keep', 'keeps', 'kept',
+  'bring', 'carry', 'hold', 'pick', 'run', 'work', 'check', 'hang', 'point', 'find',
+  'catch', 'show', 'grow', 'wake', 'call', 'cut', 'pay', 'fall', 'deal', 'watch',
+]);
+
+function endsWithDanglingWord(text: string): boolean {
+  const trimmed = String(text || '').trim();
+  if (!trimmed || /[.!?,;:]$/.test(trimmed)) return false;
+  const lastToken = trimmed.split(/\s+/).pop() || '';
+  const norm = lastToken
+    .replace(/’/g, "'")
+    .replace(/^[^a-zA-Z']+|[^a-zA-Z']+$/g, '')
+    .toLowerCase();
+  return DANGLING_END_WORDS.has(norm);
+}
+
   const merged: SubtitleSegment[] = [];
   for (const seg of segments) {
     const prev = merged[merged.length - 1];
-    const prevWords = prev ? prev.text.split(' ').length : 0;
-    const curWords = seg.text.split(' ').length;
+    const prevWords = prev ? prev.text.split(/\s+/).length : 0;
+    const curWords = seg.text.split(/\s+/).length;
     const gap = prev ? seg.start - prev.end : 99;
-    const prevEndsSentence = prev ? /[.!?]$/.test(prev.text) : true;
+    const prevEndsSentence = prev ? /[.!?]["'”)\]]*$/.test(prev.text.trim()) : true;
+    const danglingSplit = prev ? endsWithDanglingWord(prev.text) : false;
 
     if (
       prev &&
       !prevEndsSentence &&
-      gap < 0.8 &&
-      prevWords + curWords <= 14 &&
-      seg.end - prev.start <= 6.5 &&
-      (prevWords <= 4 || curWords <= 3)
+      gap < 0.75 &&
+      prevWords + curWords <= 15 &&
+      seg.end - prev.start <= 6.8 &&
+      (prevWords <= 4 || curWords <= 3 || danglingSplit)
     ) {
       prev.text = `${prev.text} ${seg.text}`;
       prev.end = seg.end;
@@ -465,7 +494,7 @@ async function googleTranslateBrowser(text: string, includeDict: boolean) {
     q: text,
   });
   let url = `https://translate.googleapis.com/translate_a/single?${params.toString()}&dt=t`;
-  if (includeDict) url += '&dt=bd';
+  if (includeDict) url += '&dt=at&dt=bd';
   const res = await fetchWithTimeout(url, 4500);
   if (!res.ok) throw new Error('Google Translate failed');
   return res.json();
@@ -478,7 +507,9 @@ async function myMemoryTranslateBrowser(text: string): Promise<string> {
   );
   if (!res.ok) return '';
   const data = await res.json();
-  return String(data?.responseData?.translatedText || '').trim();
+  const translated = String(data?.responseData?.translatedText || '').trim();
+  if (!translated || /MYMEMORY WARNING|QUERY LENGTH LIMIT/i.test(translated)) return '';
+  return translated;
 }
 
 export async function translateWordSmart(
@@ -494,81 +525,94 @@ export async function translateWordSmart(
   }
 
   const lower = cleaned.toLowerCase();
-  let baseData = clientTranslateCache.get(lower);
+  const trimmedSentence = String(sentence || '').replace(/\s+/g, ' ').trim().slice(0, 460);
+  const cacheKey = `${lower}::${trimmedSentence}`;
 
-  if (!baseData) {
-    // Try direct browser Google Translate + Free Dictionary (runs on user's residential IP!)
-    const [gtResult, dictMeta] = await Promise.all([
-      googleTranslateBrowser(cleaned, true).catch(() => null),
-      fetchDictionaryMetaBrowser(lower),
-    ]);
+  const cached = clientTranslateCache.get(cacheKey);
+  if (cached) {
+    return { ...cached, word: cleaned };
+  }
 
-    let mainTranslation = Array.isArray(gtResult?.[0])
-      ? gtResult[0].map((part: [string]) => part?.[0] || '').join('').trim()
-      : '';
-
-    const alternatives: string[] = [];
-    let partOfSpeech = '';
-    let partOfSpeechUk = '';
-
-    if (Array.isArray(gtResult?.[1])) {
-      for (const group of gtResult[1]) {
-        const pos = String(group?.[0] || '').toLowerCase();
-        if (!partOfSpeech && pos) {
-          partOfSpeech = pos;
-          partOfSpeechUk = POS_UK[pos] || pos;
-        }
-        const terms = Array.isArray(group?.[1]) ? group[1] : [];
-        for (const term of terms) {
-          if (
-            typeof term === 'string' &&
-            term.toLowerCase() !== mainTranslation.toLowerCase() &&
-            !alternatives.includes(term) &&
-            alternatives.length < 5
-          ) {
-            alternatives.push(term);
-          }
-        }
+  // Primary: call our server /api/translate (uses contextual AI model when configured,
+  // or smart POS-aware dictionary + idiom detector).
+  try {
+    const params = new URLSearchParams({ word: cleaned, sentence: trimmedSentence });
+    const srvRes = await fetchWithTimeout(`/api/translate?${params.toString()}`, 7500);
+    if (srvRes.ok) {
+      const srvData = (await srvRes.json()) as WordTranslation;
+      if (srvData && srvData.translation) {
+        clientTranslateCache.set(cacheKey, srvData);
+        return srvData;
       }
     }
+  } catch {
+    // fall back to direct browser translation if server is temporarily unreachable
+  }
 
-    if (!mainTranslation) {
-      // Fallback to server API, then MyMemory
-      try {
-        const params = new URLSearchParams({ word: cleaned, sentence });
-        const srvRes = await fetchWithTimeout(`/api/translate?${params.toString()}`, 4500);
-        if (srvRes.ok) {
-          const srvData = (await srvRes.json()) as WordTranslation;
-          clientTranslateCache.set(lower, srvData);
-          return srvData;
-        }
-      } catch {
-        // continue to MyMemory
-      }
-      mainTranslation = await myMemoryTranslateBrowser(cleaned).catch(() => '');
+  // Fallback: direct browser lookup using lowercase query + neural dt=at alternatives
+  const lookupQuery =
+    cleaned.length >= 2 && cleaned === cleaned.toUpperCase() ? cleaned : lower;
+
+  const [gtResult, dictMeta] = await Promise.all([
+    googleTranslateBrowser(lookupQuery, true).catch(() => null),
+    fetchDictionaryMetaBrowser(lower),
+  ]);
+
+  let mainTranslation = Array.isArray(gtResult?.[0])
+    ? gtResult[0].map((part: [string]) => part?.[0] || '').join('').trim()
+    : '';
+
+  const alternatives: string[] = [];
+  const pushAlt = (term: unknown) => {
+    if (typeof term !== 'string') return;
+    const t = term.trim();
+    if (!t || t.toLowerCase() === mainTranslation.toLowerCase()) return;
+    if (alternatives.some((a) => a.toLowerCase() === t.toLowerCase())) return;
+    if (alternatives.length < 4) alternatives.push(t);
+  };
+
+  // Prefer neural-ranked dt=at alternatives over raw alphabetical dt=bd
+  const atEntries = gtResult?.[5]?.[0]?.[2];
+  if (Array.isArray(atEntries)) {
+    for (const entry of atEntries) {
+      pushAlt(entry?.[0]);
     }
+  }
 
-    if (!mainTranslation) {
-      throw new Error('Не вдалося отримати переклад. Перевірте підключення.');
+  let partOfSpeech = '';
+  let partOfSpeechUk = '';
+  const dictGroups = Array.isArray(gtResult?.[1]) ? gtResult[1] : [];
+  if (dictGroups.length > 0) {
+    const mainLower = mainTranslation.toLowerCase();
+    const matchedGroup =
+      dictGroups.find(
+        (g: [string, string[]]) =>
+          Array.isArray(g?.[1]) &&
+          g[1].some((t) => typeof t === 'string' && t.toLowerCase() === mainLower)
+      ) || dictGroups[0];
+
+    const pos = String(matchedGroup?.[0] || '').toLowerCase();
+    if (pos) {
+      partOfSpeech = pos;
+      partOfSpeechUk = POS_UK[pos] || pos;
     }
+    const terms = Array.isArray(matchedGroup?.[1]) ? matchedGroup[1] : [];
+    for (const term of terms) {
+      if (alternatives.length >= 3) break;
+      pushAlt(term);
+    }
+  }
 
-    baseData = {
-      word: cleaned,
-      normalized: lower,
-      translation: mainTranslation,
-      alternatives,
-      partOfSpeech,
-      partOfSpeechUk,
-      phonetic: dictMeta.phonetic,
-      audio: dictMeta.audio,
-    };
+  if (!mainTranslation) {
+    mainTranslation = await myMemoryTranslateBrowser(lookupQuery).catch(() => '');
+  }
 
-    clientTranslateCache.set(lower, baseData);
+  if (!mainTranslation) {
+    throw new Error('Не вдалося отримати переклад. Перевірте підключення.');
   }
 
   let sentenceTranslation = '';
-  const trimmedSentence = String(sentence || '').trim();
-  if (trimmedSentence && trimmedSentence.length <= 400) {
+  if (trimmedSentence) {
     if (clientSentenceCache.has(trimmedSentence)) {
       sentenceTranslation = clientSentenceCache.get(trimmedSentence)!;
     } else {
@@ -586,10 +630,20 @@ export async function translateWordSmart(
     }
   }
 
-  return {
-    ...baseData,
+  const result: WordTranslation = {
     word: cleaned,
+    normalized: lower,
+    translation: mainTranslation,
+    alternatives,
+    partOfSpeech,
+    partOfSpeechUk,
+    phonetic: dictMeta.phonetic,
+    audio: dictMeta.audio,
     sentence: trimmedSentence,
     sentenceTranslation,
+    provider: 'dictionary',
   };
+
+  clientTranslateCache.set(cacheKey, result);
+  return result;
 }

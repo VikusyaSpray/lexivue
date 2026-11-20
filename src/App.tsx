@@ -289,6 +289,9 @@ export function App() {
             ? hasWord(translationData.normalized)
             : selectedWord && hasWord(selectedWord)
         )}
+        isPhraseSaved={Boolean(
+          translationData?.phrase && hasWord(translationData.phrase.trim().toLowerCase())
+        )}
         onAddCard={handleAddCardFromSheet}
         onRemoveCard={handleRemoveCardFromSheet}
         onClose={handleCloseSheet}

@@ -32,8 +32,12 @@ export interface WordTranslation {
   partOfSpeechUk: string;
   phonetic: string;
   audio: string;
+  phrase?: string;
+  phraseTranslation?: string;
+  phraseNote?: string;
   sentence?: string;
   sentenceTranslation?: string;
+  provider?: 'ai' | 'dictionary';
 }
 
 export interface Flashcard {

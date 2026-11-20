@@ -6,7 +6,7 @@ interface InteractiveTextProps {
   savedWords: Set<string>;
   selectedWord?: string | null;
   activeWordIndex?: number | null;
-  onWordClick: (word: string, contextText: string) => void;
+  onWordClick: (word: string, contextText: string, wordIndex?: number) => void;
 }
 
 export const InteractiveText: React.FC<InteractiveTextProps> = React.memo(
@@ -23,9 +23,10 @@ export const InteractiveText: React.FC<InteractiveTextProps> = React.memo(
           }
 
           wordCounter += 1;
+          const currentWordIdx = wordCounter;
           const isSaved = savedWords.has(token.normalized);
           const isSelected = selectedNorm === token.normalized;
-          const isSpoken = activeWordIndex !== null && wordCounter === activeWordIndex;
+          const isSpoken = activeWordIndex !== null && currentWordIdx === activeWordIndex;
 
           return (
             <button
@@ -36,7 +37,7 @@ export const InteractiveText: React.FC<InteractiveTextProps> = React.memo(
               }${isSelected ? ' word-token--selected' : ''}`}
               onClick={(e) => {
                 e.stopPropagation();
-                onWordClick(token.text, text);
+                onWordClick(token.text, text, currentWordIdx);
               }}
             >
               {token.text}

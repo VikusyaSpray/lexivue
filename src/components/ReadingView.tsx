@@ -41,8 +41,8 @@ export const ReadingView: React.FC<ReadingViewProps> = ({
     [customText]
   );
 
-  const handleParagraphWordClick = (word: string, paragraph: string) => {
-    const sentence = extractSentenceAroundWord(paragraph, word);
+  const handleParagraphWordClick = (word: string, paragraph: string, wordIdx?: number) => {
+    const sentence = extractSentenceAroundWord(paragraph, word, wordIdx);
     onWordClick(word, sentence);
   };
 
