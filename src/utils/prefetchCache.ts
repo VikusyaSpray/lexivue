@@ -253,8 +253,8 @@ export function getPrefetchedChunkCount(videoId?: string): number {
 export function buildVideoPrefetchChunks(segments: SubtitleSegment[]): VideoPrefetchChunk[] {
   if (!segments.length) return [];
 
-  const CHUNK_DURATION_SEC = 140;
-  const MAX_SENTENCES_PER_CHUNK = 18;
+  const CHUNK_DURATION_SEC = 100;
+  const MAX_SENTENCES_PER_CHUNK = 12;
 
   const chunks: VideoPrefetchChunk[] = [];
   let curSentences: { id: number; text: string }[] = [];
@@ -324,7 +324,7 @@ export async function prefetchVideoChunkIfNeeded(
 
   try {
     const controller = new AbortController();
-    const timer = window.setTimeout(() => controller.abort(), 11000);
+    const timer = window.setTimeout(() => controller.abort(), 18000);
     let res: Response;
     try {
       res = await fetch('/api/prefetch', {

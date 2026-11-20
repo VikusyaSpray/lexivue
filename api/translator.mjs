@@ -975,19 +975,19 @@ function buildBatchPrefetchPrompt(sentences) {
     '',
     'Поверни ТІЛЬКИ валідний JSON без markdown-обгортки з 3 полями:',
     '{',
-    '  "sentences": { "<id>": "природний, живий український переклад цього речення з обовʼязковим небуквальним перекладом усіх ідіом і сталих виразів" },',
+    '  "sentences": { "<id>": "природний український переклад речення (ІДІОМИ всередині перекладай за змістом, наприклад break a leg -> ні пуху ні пера, НЕ зламай ногу!)" },',
     '  "idioms": [',
-    '    { "sentenceId": 0, "phrase": "точний сталий вираз або фразове дієслово з тексту англійською", "translation": "природний український відповідник", "note": "сталий вираз або фразове дієслово" }',
+    '    { "sentenceId": 0, "phrase": "точний сталий вираз або фразове дієслово з тексту", "translation": "природний український відповідник", "note": "сталий вираз або фразове дієслово" }',
     '  ],',
     '  "words": {',
-    '    "english_word_lowercase": { "tr": "точний переклад у цьому контексті (1-3 слова)", "alts": ["2-4 інші природні українські значення"], "pos": "частина мови українською (дієслово, іменник, прикметник, прислівник...)" }',
+    '    "english_word_lowercase": { "tr": "точний переклад у цьому контексті (1-3 слова)", "alts": ["2-3 інші природні українські значення"], "pos": "частина мови українською" }',
     '  }',
     '}',
     '',
     'Правила:',
-    '- У "sentences" переклади КОЖНЕ надане речення за його id. Ідіоми всередині речення перекладай за змістом, НЕ дослівно.',
-    '- У "idioms" випиши лише реальні англійські ідіоми, сталі вирази та фразові дієслова (якщо їх немає — порожній масив []).',
-    '- У "words" додай 15-35 найкорисніших змістових англійських слів із цього уривку (дієслова, іменники, прикметники, прислівники рівня A2-C2; пропускай базові the, a, an, is, are, to, of, in, on, at, and, or, you, I, it, that, this, for, with). Ключі — англійські слова в нижньому регістрі точно як у тексті.',
+    '- У "sentences" переклади КОЖНЕ речення за id. Якщо в реченні є ідіома (наприклад break a leg, beat around the bush, take for granted), у самому перекладі речення ОБОВʼЯЗКОВО використай її справжнє значення українською (ні пуху ні пера, ходити манівцями, сприймати як належне), а НЕ дослівний переклад.',
+    '- У "idioms" випиши лише реальні ідіоми, сталі вирази та фразові дієслова (або []).',
+    '- У "words" додай 10-22 найцікавіших змістових англійських слів із цього уривку (дієслова, іменники, прикметники, прислівники; пропускай базові the, a, an, is, are, to, of, in, on, at, and, or, you, I, it, that, this, for, with). Ключі — слова в нижньому регістрі точно як у тексті.',
   ].join('\n');
 }
 
@@ -1002,35 +1002,44 @@ async function callAiBatchJson(prompt) {
     ].filter((v, i, a) => v && a.indexOf(v) === i);
 
     for (const model of models) {
-      try {
-        const url = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(
-          model
-        )}:generateContent?key=${encodeURIComponent(geminiKey)}`;
-        const res = await fetchWithTimeout(url, 8500, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            contents: [{ role: 'user', parts: [{ text: prompt }] }],
-            generationConfig: {
-              temperature: 0.1,
-              maxOutputTokens: 3400,
-              responseMimeType: 'application/json',
-            },
-          }),
-        });
-        if (!res.ok) {
-          if (res.status === 401 || res.status === 403) break;
-          continue;
+      for (const disableThinking of [true, false]) {
+        try {
+          const url = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(
+            model
+          )}:generateContent?key=${encodeURIComponent(geminiKey)}`;
+          const generationConfig = {
+            temperature: 0.1,
+            maxOutputTokens: 2800,
+            responseMimeType: 'application/json',
+          };
+          if (disableThinking) {
+            generationConfig.thinkingConfig = { thinkingBudget: 0 };
+          }
+          const res = await fetchWithTimeout(url, 11000, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              contents: [{ role: 'user', parts: [{ text: prompt }] }],
+              generationConfig,
+            }),
+          });
+          if (!res.ok) {
+            // Only retry without thinkingConfig if 400 Bad Request
+            if (res.status === 400 && disableThinking) continue;
+            if (res.status === 401 || res.status === 403) return null;
+            break;
+          }
+          const data = await res.json();
+          const text = data?.candidates?.[0]?.content?.parts?.[0]?.text || '';
+          const parsed = parseAiJson(text);
+          if (parsed && typeof parsed === 'object') {
+            lastWorkingGeminiModel = model;
+            return parsed;
+          }
+          break;
+        } catch {
+          break;
         }
-        const data = await res.json();
-        const text = data?.candidates?.[0]?.content?.parts?.[0]?.text || '';
-        const parsed = parseAiJson(text);
-        if (parsed && typeof parsed === 'object') {
-          lastWorkingGeminiModel = model;
-          return parsed;
-        }
-      } catch {
-        // try next model
       }
     }
   }
