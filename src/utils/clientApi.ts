@@ -16,6 +16,9 @@ const POS_UK: Record<string, string> = {
   determiner: 'детермінатив',
   abbreviation: 'скорочення',
   auxiliary: 'допоміжне дієслово',
+  'auxiliary verb': 'допоміжне дієслово',
+  modal: 'модальне дієслово',
+  particle: 'частка',
 };
 
 const clientTranscriptCache = new Map<string, VideoTranscript>();
@@ -702,28 +705,77 @@ export async function fetchTranscriptSmart(urlOrId: string): Promise<VideoTransc
   return result;
 }
 
-async function fetchDictionaryMetaBrowser(word: string): Promise<{ phonetic: string; audio: string }> {
+export interface DictionaryMeta {
+  phonetic: string;
+  audio: string;
+  partOfSpeech: string;
+  partOfSpeechUk: string;
+}
+
+const clientDictMetaCache = new Map<string, DictionaryMeta>();
+
+export async function fetchDictionaryMetaBrowser(
+  word: string,
+  preferredPos?: string | null
+): Promise<DictionaryMeta> {
+  const key = word.trim().toLowerCase();
+  if (!key || /\s/.test(key)) {
+    return { phonetic: '', audio: '', partOfSpeech: '', partOfSpeechUk: '' };
+  }
+  const cacheKey = `${key}::${preferredPos || ''}`;
+  const cached = clientDictMetaCache.get(cacheKey);
+  if (cached) return cached;
+
   try {
     const res = await fetchWithTimeout(
-      `https://api.dictionaryapi.dev/api/v2/entries/en/${encodeURIComponent(word)}`,
-      2200
+      `https://api.dictionaryapi.dev/api/v2/entries/en/${encodeURIComponent(key)}`,
+      2800
     );
-    if (!res.ok) return { phonetic: '', audio: '' };
+    if (!res.ok) {
+      return { phonetic: '', audio: '', partOfSpeech: '', partOfSpeechUk: '' };
+    }
     const data = await res.json();
-    const entry = Array.isArray(data) ? data[0] : null;
-    if (!entry) return { phonetic: '', audio: '' };
+    const entries = Array.isArray(data) ? data : [];
+    if (entries.length === 0) {
+      return { phonetic: '', audio: '', partOfSpeech: '', partOfSpeechUk: '' };
+    }
 
-    let phonetic = entry.phonetic || '';
+    const phoneticCandidates: string[] = [];
     let audio = '';
-    if (Array.isArray(entry.phonetics)) {
-      for (const p of entry.phonetics) {
-        if (!phonetic && p.text) phonetic = p.text;
-        if (!audio && p.audio) audio = p.audio;
+    const posList: string[] = [];
+
+    for (const entry of entries) {
+      if (entry?.phonetic) phoneticCandidates.push(String(entry.phonetic).trim());
+      if (Array.isArray(entry?.phonetics)) {
+        for (const p of entry.phonetics) {
+          if (p?.text) phoneticCandidates.push(String(p.text).trim());
+          if (!audio && p?.audio) audio = String(p.audio).trim();
+          else if (p?.audio && /us\.mp3$/i.test(String(p.audio))) {
+            audio = String(p.audio).trim();
+          }
+        }
+      }
+      if (Array.isArray(entry?.meanings)) {
+        for (const m of entry.meanings) {
+          const pos = String(m?.partOfSpeech || '').toLowerCase().trim();
+          if (pos && !posList.includes(pos)) posList.push(pos);
+        }
       }
     }
-    return { phonetic, audio };
+
+    const completePhons = phoneticCandidates.filter((p) => p && !/-\s*\/?$/.test(p));
+    const pool = completePhons.length > 0 ? completePhons : phoneticCandidates;
+    const phonetic = pool.sort((a, b) => b.length - a.length)[0] || '';
+
+    const partOfSpeech =
+      (preferredPos && posList.includes(preferredPos) ? preferredPos : posList[0]) || '';
+    const partOfSpeechUk = partOfSpeech ? POS_UK[partOfSpeech] || partOfSpeech : '';
+
+    const meta: DictionaryMeta = { phonetic, audio, partOfSpeech, partOfSpeechUk };
+    clientDictMetaCache.set(cacheKey, meta);
+    return meta;
   } catch {
-    return { phonetic: '', audio: '' };
+    return { phonetic: '', audio: '', partOfSpeech: '', partOfSpeechUk: '' };
   }
 }
 
@@ -753,6 +805,32 @@ async function myMemoryTranslateBrowser(text: string): Promise<string> {
   return translated;
 }
 
+function inferContextPosBrowser(wordLower: string, sentence: string): string | null {
+  const s = String(sentence || '').replace(/’/g, "'").trim();
+  if (!s) return null;
+  const w = wordLower.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+
+  if (wordLower === 'may' && /\b(?:in|during|of|last|next|every)\s+May\b/.test(s)) return 'noun';
+  const nounBeforeRe = new RegExp(
+    `\\b(?:a|an|the|my|your|his|her|its|our|their|this|that|these|those|some|any|no|every|each)\\s+(?:[a-z-]+\\s+)?${w}(?:\\s+(?:is|was|are|were|has|had|of|in|on|at|for|with|to|and|or|but|that|which)|[.,!?;:]|$)`,
+    'i'
+  );
+  const verbBeforeRe = new RegExp(
+    `\\b(?:to|will|would|can|could|should|must|may|might|don't|doesn't|didn't|won't|can't|couldn't|shouldn't|never|always|just|really|let's|i|you|we|they)\\s+${w}\\b`,
+    'i'
+  );
+  const adjContextRe = new RegExp(
+    `\\b(?:is|are|was|were|be|been|being|very|so|too|really|quite|pretty|super|extremely|feel|feels|felt|seem|seems|seemed|look|looks|looked)\\s+${w}\\b`,
+    'i'
+  );
+
+  if (nounBeforeRe.test(s)) return 'noun';
+  if (verbBeforeRe.test(s)) return 'verb';
+  if (adjContextRe.test(s)) return 'adjective';
+  if (wordLower.endsWith('ly') && wordLower.length > 4) return 'adverb';
+  return null;
+}
+
 export async function translateWordSmart(
   rawWord: string,
   sentence = ''
@@ -774,31 +852,69 @@ export async function translateWordSmart(
     return { ...cached, word: cleaned };
   }
 
-  // Primary: call our server /api/translate (uses contextual AI model when configured,
-  // or smart POS-aware dictionary + idiom detector).
-  try {
-    const params = new URLSearchParams({ word: cleaned, sentence: trimmedSentence });
-    const srvRes = await fetchWithTimeout(`/api/translate?${params.toString()}`, 7500);
-    if (srvRes.ok) {
-      const srvData = (await srvRes.json()) as WordTranslation;
-      if (srvData && srvData.translation) {
-        clientTranslateCache.set(cacheKey, srvData);
-        return srvData;
-      }
-    }
-  } catch {
-    // fall back to direct browser translation if server is temporarily unreachable
-  }
-
-  // Fallback: direct browser lookup using lowercase query + neural dt=at alternatives
+  const inferredPos = inferContextPosBrowser(lower, trimmedSentence);
   const lookupQuery =
     cleaned.length >= 2 && cleaned === cleaned.toUpperCase() ? cleaned : lower;
 
-  const [gtResult, dictMeta] = await Promise.all([
-    googleTranslateBrowser(lookupQuery, true).catch(() => null),
-    fetchDictionaryMetaBrowser(lower),
+  // Run server API AND residential-IP browser dictionary/Google Translate in parallel!
+  // Why? Cloud/Vercel IPs are often blocked by dictionaryapi.dev & Google dt=bd, causing
+  // missing phonetics, part of speech, and alternatives. Merging both gives us:
+  //  - AI contextual translation + idiom detection from server (when configured)
+  //  - Guaranteed phonetics, audio, part of speech & rich alternatives from user's residential IP!
+  const serverPromise: Promise<WordTranslation | null> = (async () => {
+    try {
+      const params = new URLSearchParams({ word: cleaned, sentence: trimmedSentence });
+      const srvRes = await fetchWithTimeout(`/api/translate?${params.toString()}`, 6500);
+      if (!srvRes.ok) return null;
+      const srvData = (await srvRes.json()) as WordTranslation;
+      return srvData && srvData.translation ? srvData : null;
+    } catch {
+      return null;
+    }
+  })();
+
+  const dictMetaPromise = fetchDictionaryMetaBrowser(lower, inferredPos);
+  const browserGtPromise = googleTranslateBrowser(lookupQuery, true).catch(() => null);
+  const browserSentPromise: Promise<string> = trimmedSentence
+    ? clientSentenceCache.has(trimmedSentence)
+      ? Promise.resolve(clientSentenceCache.get(trimmedSentence)!)
+      : googleTranslateBrowser(trimmedSentence, false)
+          .then((sentData) =>
+            Array.isArray(sentData?.[0])
+              ? sentData[0].map((part: [string]) => part?.[0] || '').join('').trim()
+              : ''
+          )
+          .catch(() => '')
+    : Promise.resolve('');
+
+  const [srvData, dictMeta, gtResult, browserSentTr] = await Promise.all([
+    serverPromise,
+    dictMetaPromise,
+    browserGtPromise,
+    browserSentPromise,
   ]);
 
+  if (trimmedSentence && browserSentTr) {
+    clientSentenceCache.set(trimmedSentence, browserSentTr);
+  }
+
+  // Case 1: Server returned a real AI contextual translation -> use it, enriched with residential phonetics/audio/POS
+  if (srvData && srvData.provider === 'ai') {
+    const mergedAi: WordTranslation = {
+      ...srvData,
+      word: cleaned,
+      phonetic: srvData.phonetic || dictMeta.phonetic,
+      audio: srvData.audio || dictMeta.audio,
+      partOfSpeech: srvData.partOfSpeech || dictMeta.partOfSpeech,
+      partOfSpeechUk: srvData.partOfSpeechUk || dictMeta.partOfSpeechUk,
+      sentence: trimmedSentence,
+      sentenceTranslation: srvData.sentenceTranslation || browserSentTr,
+    };
+    clientTranslateCache.set(cacheKey, mergedAi);
+    return mergedAi;
+  }
+
+  // Case 2: Extract rich browser-side Google (dt=t + dt=at + context-matched dt=bd) + dictionaryapi.dev
   let mainTranslation = Array.isArray(gtResult?.[0])
     ? gtResult[0].map((part: [string]) => part?.[0] || '').join('').trim()
     : '';
@@ -809,10 +925,10 @@ export async function translateWordSmart(
     const t = term.trim();
     if (!t || t.toLowerCase() === mainTranslation.toLowerCase()) return;
     if (alternatives.some((a) => a.toLowerCase() === t.toLowerCase())) return;
-    if (alternatives.length < 4) alternatives.push(t);
+    if (alternatives.length < 5) alternatives.push(t);
   };
 
-  // Prefer neural-ranked dt=at alternatives over raw alphabetical dt=bd
+  // Prefer neural-ranked dt=at alternatives over alphabetical dt=bd
   const atEntries = gtResult?.[5]?.[0]?.[2];
   if (Array.isArray(atEntries)) {
     for (const entry of atEntries) {
@@ -825,63 +941,93 @@ export async function translateWordSmart(
   const dictGroups = Array.isArray(gtResult?.[1]) ? gtResult[1] : [];
   if (dictGroups.length > 0) {
     const mainLower = mainTranslation.toLowerCase();
-    const matchedGroup =
-      dictGroups.find(
+    let chosenGroup = inferredPos
+      ? dictGroups.find((g: [string, string[]]) => {
+          const p = String(g?.[0] || '').toLowerCase();
+          return p === inferredPos || (inferredPos === 'verb' && p === 'auxiliary verb');
+        })
+      : null;
+
+    if (!chosenGroup && mainLower) {
+      chosenGroup = dictGroups.find(
         (g: [string, string[]]) =>
           Array.isArray(g?.[1]) &&
           g[1].some((t) => typeof t === 'string' && t.toLowerCase() === mainLower)
-      ) || dictGroups[0];
+      );
+    }
 
-    const pos = String(matchedGroup?.[0] || '').toLowerCase();
-    if (pos) {
+    if (!chosenGroup) {
+      const posOrder = ['verb', 'auxiliary verb', 'noun', 'adjective', 'adverb', 'preposition', 'conjunction'];
+      for (const p of posOrder) {
+        chosenGroup = dictGroups.find((g: [string, string[]]) => String(g?.[0] || '').toLowerCase() === p);
+        if (chosenGroup) break;
+      }
+      if (!chosenGroup) chosenGroup = dictGroups[0];
+    }
+
+    if (chosenGroup) {
+      const pos = String(chosenGroup[0] || '').toLowerCase();
       partOfSpeech = pos;
       partOfSpeechUk = POS_UK[pos] || pos;
-    }
-    const terms = Array.isArray(matchedGroup?.[1]) ? matchedGroup[1] : [];
-    for (const term of terms) {
-      if (alternatives.length >= 3) break;
-      pushAlt(term);
+      const terms = Array.isArray(chosenGroup[1]) ? chosenGroup[1] : [];
+      for (const term of terms) {
+        if (alternatives.length >= 5) break;
+        pushAlt(term);
+      }
     }
   }
 
+  // If server applied a curated override for tricky modal/homonym words (it returns POS + clean alts even without Google),
+  // prefer server's curated translation & alts when server actually returned POS & alternatives!
+  const srvHasCuratedOrRich = Boolean(
+    srvData && srvData.partOfSpeechUk && Array.isArray(srvData.alternatives) && srvData.alternatives.length > 0
+  );
+
+  if (srvHasCuratedOrRich && srvData) {
+    const mergedRich: WordTranslation = {
+      ...srvData,
+      word: cleaned,
+      phonetic: srvData.phonetic || dictMeta.phonetic,
+      audio: srvData.audio || dictMeta.audio,
+      partOfSpeech: srvData.partOfSpeech || partOfSpeech || dictMeta.partOfSpeech,
+      partOfSpeechUk: srvData.partOfSpeechUk || partOfSpeechUk || dictMeta.partOfSpeechUk,
+      sentence: trimmedSentence,
+      sentenceTranslation: browserSentTr || srvData.sentenceTranslation || '',
+    };
+    clientTranslateCache.set(cacheKey, mergedRich);
+    return mergedRich;
+  }
+
+  // Otherwise use browser's residential Google + dictionaryapi.dev, merging server's detected idiom/phrase!
+  if (!mainTranslation && srvData?.translation) {
+    mainTranslation = srvData.translation;
+  }
   if (!mainTranslation) {
     mainTranslation = await myMemoryTranslateBrowser(lookupQuery).catch(() => '');
   }
-
   if (!mainTranslation) {
     throw new Error('Не вдалося отримати переклад. Перевірте підключення.');
   }
 
-  let sentenceTranslation = '';
-  if (trimmedSentence) {
-    if (clientSentenceCache.has(trimmedSentence)) {
-      sentenceTranslation = clientSentenceCache.get(trimmedSentence)!;
-    } else {
-      try {
-        const sentData = await googleTranslateBrowser(trimmedSentence, false);
-        sentenceTranslation = Array.isArray(sentData?.[0])
-          ? sentData[0].map((part: [string]) => part?.[0] || '').join('').trim()
-          : '';
-      } catch {
-        sentenceTranslation = await myMemoryTranslateBrowser(trimmedSentence).catch(() => '');
-      }
-      if (sentenceTranslation) {
-        clientSentenceCache.set(trimmedSentence, sentenceTranslation);
-      }
-    }
-  }
+  const finalSentenceTr =
+    browserSentTr ||
+    srvData?.sentenceTranslation ||
+    (trimmedSentence ? await myMemoryTranslateBrowser(trimmedSentence).catch(() => '') : '');
 
   const result: WordTranslation = {
     word: cleaned,
     normalized: lower,
     translation: mainTranslation,
-    alternatives,
-    partOfSpeech,
-    partOfSpeechUk,
-    phonetic: dictMeta.phonetic,
-    audio: dictMeta.audio,
+    alternatives: alternatives.length > 0 ? alternatives : srvData?.alternatives || [],
+    partOfSpeech: partOfSpeech || dictMeta.partOfSpeech || srvData?.partOfSpeech || '',
+    partOfSpeechUk: partOfSpeechUk || dictMeta.partOfSpeechUk || srvData?.partOfSpeechUk || '',
+    phonetic: dictMeta.phonetic || srvData?.phonetic || '',
+    audio: dictMeta.audio || srvData?.audio || '',
+    phrase: srvData?.phrase || '',
+    phraseTranslation: srvData?.phraseTranslation || '',
+    phraseNote: srvData?.phraseNote || '',
     sentence: trimmedSentence,
-    sentenceTranslation,
+    sentenceTranslation: finalSentenceTr,
     provider: 'dictionary',
   };
 

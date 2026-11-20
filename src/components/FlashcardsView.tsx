@@ -458,6 +458,9 @@ export const FlashcardsView: React.FC<FlashcardsViewProps> = ({
                     {card.phonetic && (
                       <span className="wordlist-item__phonetic">{card.phonetic}</span>
                     )}
+                    {card.partOfSpeechUk && (
+                      <span className="badge badge--neutral">{card.partOfSpeechUk}</span>
+                    )}
                     {card.learned && <span className="badge badge--yellow">Вивчено</span>}
                   </div>
                   <div className="wordlist-item__tr">{card.translation}</div>

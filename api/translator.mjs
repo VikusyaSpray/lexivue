@@ -390,28 +390,54 @@ async function fetchWithTimeout(url, timeoutMs = 4500, options = {}) {
   }
 }
 
-export async function fetchDictionaryMeta(word) {
+export async function fetchDictionaryMeta(word, preferredPos = null) {
   try {
     const res = await fetchWithTimeout(
       `https://api.dictionaryapi.dev/api/v2/entries/en/${encodeURIComponent(word)}`,
-      2200
+      2600
     );
-    if (!res.ok) return { phonetic: '', audio: '' };
+    if (!res.ok) return { phonetic: '', audio: '', partOfSpeech: '', partOfSpeechUk: '' };
     const data = await res.json();
-    const entry = Array.isArray(data) ? data[0] : null;
-    if (!entry) return { phonetic: '', audio: '' };
+    const entries = Array.isArray(data) ? data : [];
+    if (entries.length === 0) {
+      return { phonetic: '', audio: '', partOfSpeech: '', partOfSpeechUk: '' };
+    }
 
-    let phonetic = entry.phonetic || '';
+    const phoneticCandidates = [];
     let audio = '';
-    if (Array.isArray(entry.phonetics)) {
-      for (const p of entry.phonetics) {
-        if (!phonetic && p.text) phonetic = p.text;
-        if (!audio && p.audio) audio = p.audio;
+    const posList = [];
+
+    for (const entry of entries) {
+      if (entry?.phonetic) phoneticCandidates.push(String(entry.phonetic).trim());
+      if (Array.isArray(entry?.phonetics)) {
+        for (const p of entry.phonetics) {
+          if (p?.text) phoneticCandidates.push(String(p.text).trim());
+          if (!audio && p?.audio) audio = String(p.audio).trim();
+          else if (p?.audio && /us\.mp3$/i.test(String(p.audio))) {
+            audio = String(p.audio).trim();
+          }
+        }
+      }
+      if (Array.isArray(entry?.meanings)) {
+        for (const m of entry.meanings) {
+          const pos = String(m?.partOfSpeech || '').toLowerCase().trim();
+          if (pos && !posList.includes(pos)) posList.push(pos);
+        }
       }
     }
-    return { phonetic, audio };
+
+    // Prefer complete IPA transcription (not truncated like "/ˈkjɔː-/")
+    const completePhons = phoneticCandidates.filter((p) => p && !/-\s*\/?$/.test(p));
+    const pool = completePhons.length > 0 ? completePhons : phoneticCandidates;
+    const phonetic = pool.sort((a, b) => b.length - a.length)[0] || '';
+
+    const partOfSpeech =
+      (preferredPos && posList.includes(preferredPos) ? preferredPos : posList[0]) || '';
+    const partOfSpeechUk = partOfSpeech ? POS_UK[partOfSpeech] || partOfSpeech : '';
+
+    return { phonetic, audio, partOfSpeech, partOfSpeechUk };
   } catch {
-    return { phonetic: '', audio: '' };
+    return { phonetic: '', audio: '', partOfSpeech: '', partOfSpeechUk: '' };
   }
 }
 
@@ -722,7 +748,8 @@ export async function translateWordEnhanced(rawWord, sentence = '') {
   }
 
   // Always fetch pronunciation / phonetics in parallel (fast & cached by browser/edge)
-  const dictMetaPromise = fetchDictionaryMeta(lower);
+  const inferredPos = inferContextPos(lower, trimmedSentence);
+  const dictMetaPromise = fetchDictionaryMeta(lower, inferredPos);
 
   // TIER 1: Try AI contextual model (Gemini / Groq / OpenRouter) if API key is configured
   const aiResult = await tryAiTranslation(cleaned, trimmedSentence);
@@ -748,8 +775,9 @@ export async function translateWordEnhanced(rawWord, sentence = '') {
       normalized: lower,
       translation: aiResult.translation.trim(),
       alternatives: cleanAlts,
-      partOfSpeech: '',
-      partOfSpeechUk: String(aiResult.partOfSpeechUk || '').trim().toLowerCase(),
+      partOfSpeech: dictMeta.partOfSpeech || '',
+      partOfSpeechUk:
+        String(aiResult.partOfSpeechUk || '').trim().toLowerCase() || dictMeta.partOfSpeechUk,
       phonetic: dictMeta.phonetic,
       audio: dictMeta.audio,
       phrase: String(aiResult.phrase || detectedFallback?.phrase || '').trim(),
@@ -767,7 +795,6 @@ export async function translateWordEnhanced(rawWord, sentence = '') {
   }
 
   // TIER 2: Upgraded Smart Keyless Engine (no API key needed, context-aware POS + dt=at + idiom detector)
-  const inferredPos = inferContextPos(lower, trimmedSentence);
   const lookupQuery = shouldLookupLowercase(cleaned, trimmedSentence) ? lower : cleaned;
   const idiomMatch = trimmedSentence ? detectIdiomInSentence(trimmedSentence, cleaned) : null;
 
@@ -792,6 +819,13 @@ export async function translateWordEnhanced(rawWord, sentence = '') {
 
   let { mainTranslation, alternatives, partOfSpeech, partOfSpeechUk } =
     extractSmartGoogleWordData(gtResult, lower, inferredPos);
+
+  if (!partOfSpeech && dictMeta.partOfSpeech) {
+    partOfSpeech = dictMeta.partOfSpeech;
+  }
+  if (!partOfSpeechUk && dictMeta.partOfSpeechUk) {
+    partOfSpeechUk = dictMeta.partOfSpeechUk;
+  }
 
   if (!mainTranslation) {
     mainTranslation = await myMemoryTranslateEnToUk(lookupQuery).catch(() => '');

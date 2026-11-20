@@ -1,6 +1,7 @@
-import { useState, useEffect, useCallback, useMemo } from 'react';
+import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import { Flashcard, WordTranslation } from '../types';
 import { STARTER_CARDS } from '../data/presets';
+import { fetchDictionaryMetaBrowser } from '../utils/clientApi';
 
 const STORAGE_KEY = 'lexivue_flashcards_v1';
 const LEGACY_STORAGE_KEY = 'lexview_flashcards_v1';
@@ -19,6 +20,7 @@ function loadInitialCards(): Flashcard[] {
 
 export function useFlashcards() {
   const [cards, setCards] = useState<Flashcard[]>(loadInitialCards);
+  const enrichedIdsRef = useRef<Set<string>>(new Set());
 
   useEffect(() => {
     try {
@@ -26,6 +28,44 @@ export function useFlashcards() {
     } catch {
       // ignore quota errors
     }
+  }, [cards]);
+
+  // Automatically recover missing transcription / part-of-speech for previously saved single-word cards
+  useEffect(() => {
+    const missing = cards.filter(
+      (c) =>
+        !enrichedIdsRef.current.has(c.id) &&
+        !/\s/.test(c.word.trim()) &&
+        (!c.phonetic || !c.partOfSpeechUk)
+    );
+    if (missing.length === 0) return;
+
+    let cancelled = false;
+    (async () => {
+      for (const card of missing.slice(0, 12)) {
+        enrichedIdsRef.current.add(card.id);
+        const meta = await fetchDictionaryMetaBrowser(card.normalized || card.word);
+        if (cancelled) return;
+        if (meta.phonetic || meta.partOfSpeechUk || meta.audio) {
+          setCards((prev) =>
+            prev.map((c) =>
+              c.id === card.id
+                ? {
+                    ...c,
+                    phonetic: c.phonetic || meta.phonetic,
+                    partOfSpeechUk: c.partOfSpeechUk || meta.partOfSpeechUk,
+                    audio: c.audio || meta.audio,
+                  }
+                : c
+            )
+          );
+        }
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
   }, [cards]);
 
   const savedNormalizedSet = useMemo(
