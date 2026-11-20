@@ -1004,29 +1004,14 @@ function extractUniqueContentWords(sentences, maxWords = 65) {
 function buildBatchPrefetchPrompt(sentences, targetWords) {
   const numbered = sentences.map((s) => `${s.id}: ${s.text}`).join('\n');
   return [
-    'Ти — професійний англо-український словник і перекладач субтитрів для українців.',
-    'Уривок субтитрів з YouTube:',
+    'Англо-український словник і перекладач субтитрів. Відповідай стисло, природною українською.',
+    'Речення:',
     numbered,
+    targetWords.length > 0 ? `Слова (${targetWords.length}): ${targetWords.join(', ')}` : '',
     '',
-    targetWords.length > 0
-      ? `Список слів для словника (${targetWords.length} шт.): ${targetWords.join(', ')}`
-      : '',
-    '',
-    'Поверни ТІЛЬКИ валідний JSON без markdown-обгортки з 3 полями:',
-    '{',
-    '  "sentences": { "<id>": "природний український переклад речення (ІДІОМИ перекладай за змістом, напр. break a leg -> ні пуху ні пера, НЕ зламай ногу!)" },',
-    '  "idioms": [',
-    '    { "sentenceId": 0, "phrase": "точний сталий вираз або фразове дієслово з тексту", "translation": "природний український відповідник", "note": "сталий вираз або фразове дієслово" }',
-    '  ],',
-    '  "words": {',
-    '    "word": { "tr": "точний переклад у цьому контексті (1-3 слова)", "alts": ["2-3 інші природні значення"], "pos": "частина мови українською" }',
-    '  }',
-    '}',
-    '',
-    'Правила:',
-    '- У "sentences" переклади КОЖНЕ пронумероване речення. Якщо в реченні є ідіома, вбудуй її справжнє значення в переклад речення.',
-    '- У "idioms" випиши лише реальні ідіоми, сталі вирази та фразові дієслова (або []).',
-    '- У "words" ОБОВʼЯЗКОВО додай переклад для КОЖНОГО слова зі списку вище (ключ точно як у списку, в нижньому регістрі).',
+    'Поверни ТІЛЬКИ валідний компактний JSON без markdown:',
+    '{"sentences":{"0":"природний переклад речення (ідіоми перекладай за змістом, напр. break a leg -> ні пуху ні пера)"},"idioms":[{"sentenceId":0,"phrase":"ідіома англ","translation":"значення укр","note":"сталий вираз"}],"words":{"word":["переклад у контексті","частина мови","альт1","альт2"]}}',
+    'Правила: переклади КОЖНЕ речення за id; у "words" додай КОЖНЕ слово зі списку (ключ у нижньому регістрі, значення — масив [переклад, частина мови, 1-2 синоніми]); у "idioms" тільки реальні ідіоми/фразові дієслова (або []).',
   ].join('\n');
 }
 
@@ -1173,7 +1158,7 @@ export async function prefetchChunkTranslations(rawSentences = []) {
     };
   }
 
-  const targetWords = extractUniqueContentWords(sentences, 65);
+  const targetWords = extractUniqueContentWords(sentences, 38);
   const parsed = await callAiBatchJson(buildBatchPrefetchPrompt(sentences, targetWords));
   if (!parsed) {
     return {
@@ -1218,7 +1203,7 @@ export async function prefetchChunkTranslations(rawSentences = []) {
     }
   }
 
-  // Normalize words dictionary
+  // Normalize words dictionary (supports both ultra-compact array [tr, pos, alt1, alt2] and object {tr, alts, pos})
   const cleanWords = {};
   if (parsed.words && typeof parsed.words === 'object') {
     for (const [rawKey, entry] of Object.entries(parsed.words)) {
@@ -1227,20 +1212,33 @@ export async function prefetchChunkTranslations(rawSentences = []) {
         .replace(/^[^a-zA-Z'-]+|[^a-zA-Z'-]+$/g, '')
         .toLowerCase();
       if (!key || /\s/.test(key)) continue;
-      const tr = String(entry?.tr || entry?.translation || '').trim();
+
+      let tr = '';
+      let pos = '';
+      let rawAlts = [];
+
+      if (Array.isArray(entry)) {
+        tr = String(entry[0] || '').trim();
+        pos = String(entry[1] || '').trim().toLowerCase();
+        rawAlts = entry.slice(2);
+      } else if (entry && typeof entry === 'object') {
+        tr = String(entry.tr || entry.translation || '').trim();
+        pos = String(entry.pos || entry.partOfSpeechUk || '').trim().toLowerCase();
+        rawAlts = Array.isArray(entry.alts || entry.alternatives)
+          ? entry.alts || entry.alternatives
+          : [];
+      }
+
       if (!tr) continue;
-      const alts = Array.isArray(entry?.alts || entry?.alternatives)
-        ? (entry.alts || entry.alternatives)
-            .map((a) => String(a || '').trim())
-            .filter(
-              (a, idx, arr) =>
-                a &&
-                a.toLowerCase() !== tr.toLowerCase() &&
-                arr.findIndex((x) => x.toLowerCase() === a.toLowerCase()) === idx
-            )
-            .slice(0, 5)
-        : [];
-      const pos = String(entry?.pos || entry?.partOfSpeechUk || '').trim().toLowerCase();
+      const alts = rawAlts
+        .map((a) => String(a || '').trim())
+        .filter(
+          (a, idx, arr) =>
+            a &&
+            a.toLowerCase() !== tr.toLowerCase() &&
+            arr.findIndex((x) => x.toLowerCase() === a.toLowerCase()) === idx
+        )
+        .slice(0, 4);
       cleanWords[key] = { tr, alts, pos };
     }
   }

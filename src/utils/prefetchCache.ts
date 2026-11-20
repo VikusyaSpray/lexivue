@@ -7,7 +7,7 @@ import type {
 } from '../types';
 import { buildContextSentenceAroundSegment } from './text';
 
-const STORAGE_KEY = 'lexivue_tr_cache_v2';
+const STORAGE_KEY = 'lexivue_tr_cache_v3';
 const MAX_WORD_CACHE = 400;
 const MAX_SENTENCE_CACHE = 600;
 const MAX_CHUNK_WORDS = 900;
@@ -401,8 +401,8 @@ export function getPrefetchedChunkCount(videoId?: string): number {
 export function buildVideoPrefetchChunks(segments: SubtitleSegment[]): VideoPrefetchChunk[] {
   if (!segments.length) return [];
 
-  const CHUNK_DURATION_SEC = 90;
-  const MAX_SENTENCES_PER_CHUNK = 10;
+  const CHUNK_DURATION_SEC = 55;
+  const MAX_SENTENCES_PER_CHUNK = 7;
 
   const chunks: VideoPrefetchChunk[] = [];
   let curSentences: { id: number; text: string }[] = [];
