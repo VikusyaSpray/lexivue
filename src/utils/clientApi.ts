@@ -1,4 +1,9 @@
 import { SubtitleSegment, VideoTranscript, WordTiming, WordTranslation } from '../types';
+import {
+  findIdiomForWordInVideo,
+  findSentenceTranslationInCache,
+  savePersistentWordTranslation,
+} from './prefetchCache';
 
 const WORD_REGEX = /[A-Za-z]+(?:['’-][A-Za-z]+)*/g;
 
@@ -833,7 +838,8 @@ function inferContextPosBrowser(wordLower: string, sentence: string): string | n
 
 export async function translateWordSmart(
   rawWord: string,
-  sentence = ''
+  sentence = '',
+  videoId?: string
 ): Promise<WordTranslation> {
   const cleaned = String(rawWord || '')
     .trim()
@@ -852,15 +858,14 @@ export async function translateWordSmart(
     return { ...cached, word: cleaned };
   }
 
+  const prefetchedSentTr = findSentenceTranslationInCache(trimmedSentence);
+  const prefetchedIdiom = findIdiomForWordInVideo(videoId, trimmedSentence, cleaned);
+
   const inferredPos = inferContextPosBrowser(lower, trimmedSentence);
   const lookupQuery =
     cleaned.length >= 2 && cleaned === cleaned.toUpperCase() ? cleaned : lower;
 
   // Run server API AND residential-IP browser dictionary/Google Translate in parallel!
-  // Why? Cloud/Vercel IPs are often blocked by dictionaryapi.dev & Google dt=bd, causing
-  // missing phonetics, part of speech, and alternatives. Merging both gives us:
-  //  - AI contextual translation + idiom detection from server (when configured)
-  //  - Guaranteed phonetics, audio, part of speech & rich alternatives from user's residential IP!
   const serverPromise: Promise<WordTranslation | null> = (async () => {
     try {
       const params = new URLSearchParams({ word: cleaned, sentence: trimmedSentence });
@@ -876,15 +881,17 @@ export async function translateWordSmart(
   const dictMetaPromise = fetchDictionaryMetaBrowser(lower, inferredPos);
   const browserGtPromise = googleTranslateBrowser(lookupQuery, true).catch(() => null);
   const browserSentPromise: Promise<string> = trimmedSentence
-    ? clientSentenceCache.has(trimmedSentence)
-      ? Promise.resolve(clientSentenceCache.get(trimmedSentence)!)
-      : googleTranslateBrowser(trimmedSentence, false)
-          .then((sentData) =>
-            Array.isArray(sentData?.[0])
-              ? sentData[0].map((part: [string]) => part?.[0] || '').join('').trim()
-              : ''
-          )
-          .catch(() => '')
+    ? prefetchedSentTr
+      ? Promise.resolve(prefetchedSentTr)
+      : clientSentenceCache.has(trimmedSentence)
+        ? Promise.resolve(clientSentenceCache.get(trimmedSentence)!)
+        : googleTranslateBrowser(trimmedSentence, false)
+            .then((sentData) =>
+              Array.isArray(sentData?.[0])
+                ? sentData[0].map((part: [string]) => part?.[0] || '').join('').trim()
+                : ''
+            )
+            .catch(() => '')
     : Promise.resolve('');
 
   const [srvData, dictMeta, gtResult, browserSentTr] = await Promise.all([
@@ -907,10 +914,14 @@ export async function translateWordSmart(
       audio: srvData.audio || dictMeta.audio,
       partOfSpeech: srvData.partOfSpeech || dictMeta.partOfSpeech,
       partOfSpeechUk: srvData.partOfSpeechUk || dictMeta.partOfSpeechUk,
+      phrase: srvData.phrase || prefetchedIdiom?.phrase || '',
+      phraseTranslation: srvData.phraseTranslation || prefetchedIdiom?.translation || '',
+      phraseNote: srvData.phraseNote || prefetchedIdiom?.note || '',
       sentence: trimmedSentence,
-      sentenceTranslation: srvData.sentenceTranslation || browserSentTr,
+      sentenceTranslation: srvData.sentenceTranslation || prefetchedSentTr || browserSentTr,
     };
     clientTranslateCache.set(cacheKey, mergedAi);
+    savePersistentWordTranslation(lower, trimmedSentence, mergedAi);
     return mergedAi;
   }
 
@@ -991,10 +1002,14 @@ export async function translateWordSmart(
       audio: srvData.audio || dictMeta.audio,
       partOfSpeech: srvData.partOfSpeech || partOfSpeech || dictMeta.partOfSpeech,
       partOfSpeechUk: srvData.partOfSpeechUk || partOfSpeechUk || dictMeta.partOfSpeechUk,
+      phrase: srvData.phrase || prefetchedIdiom?.phrase || '',
+      phraseTranslation: srvData.phraseTranslation || prefetchedIdiom?.translation || '',
+      phraseNote: srvData.phraseNote || prefetchedIdiom?.note || '',
       sentence: trimmedSentence,
-      sentenceTranslation: browserSentTr || srvData.sentenceTranslation || '',
+      sentenceTranslation: prefetchedSentTr || browserSentTr || srvData.sentenceTranslation || '',
     };
     clientTranslateCache.set(cacheKey, mergedRich);
+    savePersistentWordTranslation(lower, trimmedSentence, mergedRich);
     return mergedRich;
   }
 
@@ -1010,6 +1025,7 @@ export async function translateWordSmart(
   }
 
   const finalSentenceTr =
+    prefetchedSentTr ||
     browserSentTr ||
     srvData?.sentenceTranslation ||
     (trimmedSentence ? await myMemoryTranslateBrowser(trimmedSentence).catch(() => '') : '');
@@ -1023,14 +1039,15 @@ export async function translateWordSmart(
     partOfSpeechUk: partOfSpeechUk || dictMeta.partOfSpeechUk || srvData?.partOfSpeechUk || '',
     phonetic: dictMeta.phonetic || srvData?.phonetic || '',
     audio: dictMeta.audio || srvData?.audio || '',
-    phrase: srvData?.phrase || '',
-    phraseTranslation: srvData?.phraseTranslation || '',
-    phraseNote: srvData?.phraseNote || '',
+    phrase: srvData?.phrase || prefetchedIdiom?.phrase || '',
+    phraseTranslation: srvData?.phraseTranslation || prefetchedIdiom?.translation || '',
+    phraseNote: srvData?.phraseNote || prefetchedIdiom?.note || '',
     sentence: trimmedSentence,
     sentenceTranslation: finalSentenceTr,
     provider: 'dictionary',
   };
 
   clientTranslateCache.set(cacheKey, result);
+  savePersistentWordTranslation(lower, trimmedSentence, result);
   return result;
 }

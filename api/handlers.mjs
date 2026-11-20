@@ -1,4 +1,4 @@
-import { translateWordEnhanced } from './translator.mjs';
+import { translateWordEnhanced, prefetchChunkTranslations } from './translator.mjs';
 
 const transcriptCache = new Map();
 
@@ -1083,6 +1083,28 @@ export async function translateWord(rawWord, sentence = '', options = {}) {
   return translateWordEnhanced(rawWord, sentence, options);
 }
 
+export async function prefetchChunk(sentences = []) {
+  return prefetchChunkTranslations(sentences);
+}
+
+function readJsonBody(req) {
+  return new Promise((resolve) => {
+    let raw = '';
+    req.on('data', (chunk) => {
+      raw += chunk;
+      if (raw.length > 200_000) raw = raw.slice(0, 200_000);
+    });
+    req.on('end', () => {
+      try {
+        resolve(raw ? JSON.parse(raw) : {});
+      } catch {
+        resolve({});
+      }
+    });
+    req.on('error', () => resolve({}));
+  });
+}
+
 export async function handleApiRequest(req, res) {
   const parsedUrl = new URL(req.url || '/', 'http://localhost');
 
@@ -1103,7 +1125,14 @@ export async function handleApiRequest(req, res) {
     if (parsedUrl.pathname === '/api/translate' && req.method === 'GET') {
       const word = parsedUrl.searchParams.get('word') || '';
       const sentence = parsedUrl.searchParams.get('sentence') || '';
-      const result = await translateWord(word, sentence);
+      const debug = parsedUrl.searchParams.get('debug') === '1';
+      const result = await translateWord(word, sentence, { debug });
+      return sendJson(result.status, result.body);
+    }
+
+    if (parsedUrl.pathname === '/api/prefetch' && req.method === 'POST') {
+      const body = await readJsonBody(req);
+      const result = await prefetchChunk(body?.sentences || []);
       return sendJson(result.status, result.body);
     }
 

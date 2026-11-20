@@ -23,6 +23,26 @@ export interface VideoTranscript {
   segments: SubtitleSegment[];
 }
 
+export interface PrefetchedIdiom {
+  sentenceId: number;
+  phrase: string;
+  translation: string;
+  note: string;
+}
+
+export interface PrefetchedWordEntry {
+  tr: string;
+  alts: string[];
+  pos: string;
+}
+
+export interface VideoPrefetchChunk {
+  chunkIndex: number;
+  startSec: number;
+  endSec: number;
+  sentences: { id: number; text: string }[];
+}
+
 export interface WordTranslation {
   word: string;
   normalized: string;

@@ -13,6 +13,7 @@ interface ReadingViewProps {
   transcript: VideoTranscript | null;
   savedWords: Set<string>;
   selectedWord: string | null;
+  highlightedPhrases?: string[];
   onWordClick: (word: string, contextText: string) => void;
   onGoToVideo: () => void;
 }
@@ -23,6 +24,7 @@ export const ReadingView: React.FC<ReadingViewProps> = ({
   transcript,
   savedWords,
   selectedWord,
+  highlightedPhrases = [],
   onWordClick,
   onGoToVideo,
 }) => {
@@ -131,6 +133,7 @@ export const ReadingView: React.FC<ReadingViewProps> = ({
                     text={para}
                     savedWords={savedWords}
                     selectedWord={selectedWord}
+                    highlightedPhrases={highlightedPhrases}
                     onWordClick={handleParagraphWordClick}
                   />
                 </p>

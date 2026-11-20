@@ -9,7 +9,7 @@ import {
   AlertCircle,
   PauseCircle,
 } from 'lucide-react';
-import { VideoTranscript } from '../types';
+import { VideoPrefetchChunk, VideoTranscript } from '../types';
 import { PRESET_VIDEOS } from '../data/presets';
 import { formatTime, buildContextSentenceAroundSegment } from '../utils/text';
 import { YouTubePlayer, YouTubePlayerHandle } from './YouTubePlayer';
@@ -23,6 +23,10 @@ interface VideoStudyViewProps {
   error: string | null;
   savedWords: Set<string>;
   selectedWord: string | null;
+  highlightedPhrases: string[];
+  prefetchChunks: VideoPrefetchChunk[];
+  prefetchedChunkCount: number;
+  onPrefetchChunk: (chunkIndex: number) => void;
   pauseOnWordClick: boolean;
   onTogglePauseOnWordClick: () => void;
   playerRef: React.RefObject<YouTubePlayerHandle | null>;
@@ -39,6 +43,10 @@ export const VideoStudyView: React.FC<VideoStudyViewProps> = ({
   error,
   savedWords,
   selectedWord,
+  highlightedPhrases,
+  prefetchChunks,
+  prefetchedChunkCount,
+  onPrefetchChunk,
   pauseOnWordClick,
   onTogglePauseOnWordClick,
   playerRef,
@@ -54,6 +62,27 @@ export const VideoStudyView: React.FC<VideoStudyViewProps> = ({
   useEffect(() => {
     setCurrentTime(0);
   }, [transcript?.videoId]);
+
+  // Lazy prefetch: prefetch current chunk + lookahead next chunk once 55% through current chunk
+  const currentChunkIdx = useMemo(() => {
+    if (!prefetchChunks.length) return -1;
+    for (let i = 0; i < prefetchChunks.length; i++) {
+      if (currentTime <= prefetchChunks[i].endSec + 1) return i;
+    }
+    return prefetchChunks.length - 1;
+  }, [prefetchChunks, currentTime]);
+
+  useEffect(() => {
+    if (!transcript || currentChunkIdx < 0 || !prefetchChunks[currentChunkIdx]) return;
+    const chunk = prefetchChunks[currentChunkIdx];
+    onPrefetchChunk(chunk.chunkIndex);
+
+    const span = Math.max(10, chunk.endSec - chunk.startSec);
+    const progress = (currentTime - chunk.startSec) / span;
+    if (progress >= 0.55 && currentChunkIdx + 1 < prefetchChunks.length) {
+      onPrefetchChunk(prefetchChunks[currentChunkIdx + 1].chunkIndex);
+    }
+  }, [transcript, currentChunkIdx, prefetchChunks, currentTime, onPrefetchChunk]);
 
   const activeIndex = useMemo(() => {
     if (!transcript || transcript.segments.length === 0) return -1;
@@ -270,6 +299,7 @@ export const VideoStudyView: React.FC<VideoStudyViewProps> = ({
                       savedWords={savedWords}
                       selectedWord={selectedWord}
                       activeWordIndex={activeWordIndex}
+                      highlightedPhrases={highlightedPhrases}
                       onWordClick={(word, segText, wordIdx) =>
                         handleSegmentWordClick(activeIndex, word, segText, wordIdx)
                       }
@@ -300,6 +330,19 @@ export const VideoStudyView: React.FC<VideoStudyViewProps> = ({
                     </span>
                   ) : (
                     <span className="badge badge--yellow">ручні субтитри</span>
+                  )}
+                  {prefetchedChunkCount > 0 && (
+                    <span
+                      className="badge badge--neutral"
+                      title="Переклади речень, ідіом та ключових слів для цього уривку вже готові в памʼяті"
+                    >
+                      <Sparkles size={11} />
+                      <span>
+                        {highlightedPhrases.length > 0
+                          ? `швидкий переклад · ${highlightedPhrases.length} ідіом`
+                          : 'швидкий переклад'}
+                      </span>
+                    </span>
                   )}
                   {transcript.language && !transcript.language.toLowerCase().startsWith('en') && (
                     <span className="badge badge--coral">
@@ -368,6 +411,7 @@ export const VideoStudyView: React.FC<VideoStudyViewProps> = ({
                         savedWords={savedWords}
                         selectedWord={selectedWord}
                         activeWordIndex={isActive ? activeWordIndex : null}
+                        highlightedPhrases={highlightedPhrases}
                         onWordClick={(word, segText, wordIdx) =>
                           handleSegmentWordClick(idx, word, segText, wordIdx)
                         }

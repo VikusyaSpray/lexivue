@@ -962,3 +962,251 @@ export async function translateWordEnhanced(rawWord, sentence = '', options = {}
   setCache(cacheKey, payload);
   return { status: 200, body: options.debug ? { ...payload, aiDiag: diag } : payload };
 }
+
+const chunkPrefetchCache = new Map();
+const MAX_CHUNK_CACHE = 120;
+
+function buildBatchPrefetchPrompt(sentences) {
+  const numbered = sentences.map((s) => `${s.id}: ${s.text}`).join('\n');
+  return [
+    'Ти — професійний англо-український словник і перекладач субтитрів для українців.',
+    'Нижче — уривок субтитрів з YouTube (пронумеровані речення):',
+    numbered,
+    '',
+    'Поверни ТІЛЬКИ валідний JSON без markdown-обгортки з 3 полями:',
+    '{',
+    '  "sentences": { "<id>": "природний, живий український переклад цього речення з обовʼязковим небуквальним перекладом усіх ідіом і сталих виразів" },',
+    '  "idioms": [',
+    '    { "sentenceId": 0, "phrase": "точний сталий вираз або фразове дієслово з тексту англійською", "translation": "природний український відповідник", "note": "сталий вираз або фразове дієслово" }',
+    '  ],',
+    '  "words": {',
+    '    "english_word_lowercase": { "tr": "точний переклад у цьому контексті (1-3 слова)", "alts": ["2-4 інші природні українські значення"], "pos": "частина мови українською (дієслово, іменник, прикметник, прислівник...)" }',
+    '  }',
+    '}',
+    '',
+    'Правила:',
+    '- У "sentences" переклади КОЖНЕ надане речення за його id. Ідіоми всередині речення перекладай за змістом, НЕ дослівно.',
+    '- У "idioms" випиши лише реальні англійські ідіоми, сталі вирази та фразові дієслова (якщо їх немає — порожній масив []).',
+    '- У "words" додай 15-35 найкорисніших змістових англійських слів із цього уривку (дієслова, іменники, прикметники, прислівники рівня A2-C2; пропускай базові the, a, an, is, are, to, of, in, on, at, and, or, you, I, it, that, this, for, with). Ключі — англійські слова в нижньому регістрі точно як у тексті.',
+  ].join('\n');
+}
+
+async function callAiBatchJson(prompt) {
+  const geminiKey = (process.env.GEMINI_API_KEY || '').trim();
+  if (geminiKey) {
+    const models = [
+      process.env.GEMINI_MODEL?.trim(),
+      lastWorkingGeminiModel,
+      'gemini-flash-lite-latest',
+      'gemini-flash-latest',
+    ].filter((v, i, a) => v && a.indexOf(v) === i);
+
+    for (const model of models) {
+      try {
+        const url = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(
+          model
+        )}:generateContent?key=${encodeURIComponent(geminiKey)}`;
+        const res = await fetchWithTimeout(url, 8500, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            contents: [{ role: 'user', parts: [{ text: prompt }] }],
+            generationConfig: {
+              temperature: 0.1,
+              maxOutputTokens: 3400,
+              responseMimeType: 'application/json',
+            },
+          }),
+        });
+        if (!res.ok) {
+          if (res.status === 401 || res.status === 403) break;
+          continue;
+        }
+        const data = await res.json();
+        const text = data?.candidates?.[0]?.content?.parts?.[0]?.text || '';
+        const parsed = parseAiJson(text);
+        if (parsed && typeof parsed === 'object') {
+          lastWorkingGeminiModel = model;
+          return parsed;
+        }
+      } catch {
+        // try next model
+      }
+    }
+  }
+
+  const groqKey = (process.env.GROQ_API_KEY || '').trim();
+  if (groqKey) {
+    try {
+      const res = await fetchWithTimeout('https://api.groq.com/openai/v1/chat/completions', 8500, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${groqKey}`,
+        },
+        body: JSON.stringify({
+          model: (process.env.GROQ_MODEL || '').trim() || 'llama-3.3-70b-versatile',
+          temperature: 0.1,
+          max_tokens: 3000,
+          response_format: { type: 'json_object' },
+          messages: [
+            {
+              role: 'system',
+              content: 'You are an English-to-Ukrainian subtitle translator and dictionary. Reply strictly with valid JSON.',
+            },
+            { role: 'user', content: prompt },
+          ],
+        }),
+      });
+      if (res.ok) {
+        const data = await res.json();
+        const text = data?.choices?.[0]?.message?.content || '';
+        const parsed = parseAiJson(text);
+        if (parsed && typeof parsed === 'object') return parsed;
+      }
+    } catch {
+      // fall through
+    }
+  }
+
+  return null;
+}
+
+export async function prefetchChunkTranslations(rawSentences = []) {
+  const sentences = (Array.isArray(rawSentences) ? rawSentences : [])
+    .slice(0, 24)
+    .map((item, idx) => ({
+      id: typeof item?.id === 'number' ? item.id : idx,
+      text: String(item?.text || '').replace(/\s+/g, ' ').trim().slice(0, 380),
+    }))
+    .filter((s) => s.text.length >= 3);
+
+  if (sentences.length === 0) {
+    return { status: 400, body: { error: 'Порожній пакет речень.' } };
+  }
+
+  const cacheKey = sentences.map((s) => `${s.id}:${s.text}`).join('|');
+  if (chunkPrefetchCache.has(cacheKey)) {
+    return { status: 200, body: chunkPrefetchCache.get(cacheKey) };
+  }
+
+  const hasAiKey = Boolean(
+    (process.env.GEMINI_API_KEY || '').trim() || (process.env.GROQ_API_KEY || '').trim()
+  );
+
+  // Built-in idiom scan works instantaneously even without AI
+  const localIdioms = [];
+  for (const s of sentences) {
+    for (const rule of IDIOM_RULES) {
+      rule.re.lastIndex = 0;
+      let m;
+      while ((m = rule.re.exec(s.text)) !== null) {
+        const phrase = m[0].trim();
+        if (
+          !localIdioms.some(
+            (x) => x.sentenceId === s.id && x.phrase.toLowerCase() === phrase.toLowerCase()
+          )
+        ) {
+          localIdioms.push({
+            sentenceId: s.id,
+            phrase,
+            translation: rule.uk,
+            note: rule.note,
+          });
+        }
+      }
+    }
+  }
+
+  if (!hasAiKey) {
+    return {
+      status: 200,
+      body: { provider: 'none', sentences: {}, idioms: localIdioms, words: {} },
+    };
+  }
+
+  const parsed = await callAiBatchJson(buildBatchPrefetchPrompt(sentences));
+  if (!parsed) {
+    return {
+      status: 200,
+      body: { provider: 'none', sentences: {}, idioms: localIdioms, words: {} },
+    };
+  }
+
+  // Normalize sentences map
+  const cleanSentences = {};
+  if (parsed.sentences && typeof parsed.sentences === 'object') {
+    for (const s of sentences) {
+      const val = parsed.sentences[String(s.id)] ?? parsed.sentences[s.id];
+      if (typeof val === 'string' && val.trim()) {
+        cleanSentences[String(s.id)] = val.trim();
+      }
+    }
+  }
+
+  // Normalize & merge idioms (AI idioms + built-in backup)
+  const cleanIdioms = [];
+  if (Array.isArray(parsed.idioms)) {
+    for (const item of parsed.idioms) {
+      const phrase = String(item?.phrase || '').trim();
+      const translation = String(item?.translation || '').trim();
+      if (!phrase || !translation || phrase.split(/\s+/).length < 2) continue;
+      const sentenceId = typeof item?.sentenceId === 'number' ? item.sentenceId : Number(item?.sentenceId);
+      const note = String(item?.note || 'сталий вираз').trim();
+      if (!cleanIdioms.some((x) => x.phrase.toLowerCase() === phrase.toLowerCase())) {
+        cleanIdioms.push({
+          sentenceId: Number.isFinite(sentenceId) ? sentenceId : -1,
+          phrase,
+          translation,
+          note,
+        });
+      }
+    }
+  }
+  for (const li of localIdioms) {
+    if (!cleanIdioms.some((x) => x.phrase.toLowerCase() === li.phrase.toLowerCase())) {
+      cleanIdioms.push(li);
+    }
+  }
+
+  // Normalize words dictionary
+  const cleanWords = {};
+  if (parsed.words && typeof parsed.words === 'object') {
+    for (const [rawKey, entry] of Object.entries(parsed.words)) {
+      const key = String(rawKey || '')
+        .trim()
+        .replace(/^[^a-zA-Z'-]+|[^a-zA-Z'-]+$/g, '')
+        .toLowerCase();
+      if (!key || /\s/.test(key)) continue;
+      const tr = String(entry?.tr || entry?.translation || '').trim();
+      if (!tr) continue;
+      const alts = Array.isArray(entry?.alts || entry?.alternatives)
+        ? (entry.alts || entry.alternatives)
+            .map((a) => String(a || '').trim())
+            .filter(
+              (a, idx, arr) =>
+                a &&
+                a.toLowerCase() !== tr.toLowerCase() &&
+                arr.findIndex((x) => x.toLowerCase() === a.toLowerCase()) === idx
+            )
+            .slice(0, 5)
+        : [];
+      const pos = String(entry?.pos || entry?.partOfSpeechUk || '').trim().toLowerCase();
+      cleanWords[key] = { tr, alts, pos };
+    }
+  }
+
+  const body = {
+    provider: 'ai',
+    sentences: cleanSentences,
+    idioms: cleanIdioms,
+    words: cleanWords,
+  };
+
+  if (chunkPrefetchCache.size >= MAX_CHUNK_CACHE) {
+    const firstKey = chunkPrefetchCache.keys().next().value;
+    if (firstKey !== undefined) chunkPrefetchCache.delete(firstKey);
+  }
+  chunkPrefetchCache.set(cacheKey, body);
+  return { status: 200, body };
+}

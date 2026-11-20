@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { PlaySquare, BookOpen, Layers, Check, Sun, Moon } from 'lucide-react';
 import { ActiveTab, VideoTranscript, WordTranslation } from './types';
 import { useFlashcards } from './hooks/useFlashcards';
@@ -7,7 +7,19 @@ import { VideoStudyView } from './components/VideoStudyView';
 import { ReadingView } from './components/ReadingView';
 import { FlashcardsView } from './components/FlashcardsView';
 import { TranslationSheet } from './components/TranslationSheet';
-import { fetchTranscriptSmart, translateWordSmart } from './utils/clientApi';
+import {
+  fetchDictionaryMetaBrowser,
+  fetchTranscriptSmart,
+  translateWordSmart,
+} from './utils/clientApi';
+import {
+  buildVideoPrefetchChunks,
+  getPrefetchedChunkCount,
+  getPrefetchedIdiomsForVideo,
+  lookupInstantTranslation,
+  prefetchVideoChunkIfNeeded,
+  savePersistentWordTranslation,
+} from './utils/prefetchCache';
 
 type ThemeMode = 'light' | 'dark';
 
@@ -67,6 +79,41 @@ export function App() {
   const [toast, setToast] = useState<string | null>(null);
   const toastTimerRef = useRef<number | null>(null);
 
+  // Lazy chunk prefetching for instant 0ms translations & idiom highlights
+  const [prefetchRevision, setPrefetchRevision] = useState(0);
+  const prefetchChunks = useMemo(
+    () => (transcript ? buildVideoPrefetchChunks(transcript.segments) : []),
+    [transcript]
+  );
+
+  const handlePrefetchChunk = useCallback(
+    (chunkIndex: number) => {
+      if (!transcript) return;
+      const chunk = prefetchChunks[chunkIndex];
+      if (!chunk) return;
+      void prefetchVideoChunkIfNeeded(transcript.videoId, chunk, () => {
+        setPrefetchRevision((r) => r + 1);
+      });
+    },
+    [transcript, prefetchChunks]
+  );
+
+  // Start prefetching Chunk 0 in background as soon as a video loads
+  useEffect(() => {
+    if (!transcript || prefetchChunks.length === 0) return;
+    handlePrefetchChunk(0);
+  }, [transcript, prefetchChunks, handlePrefetchChunk]);
+
+  const highlightedPhrases = useMemo(() => {
+    void prefetchRevision;
+    return getPrefetchedIdiomsForVideo(transcript?.videoId);
+  }, [transcript?.videoId, prefetchRevision]);
+
+  const prefetchedChunkCount = useMemo(() => {
+    void prefetchRevision;
+    return getPrefetchedChunkCount(transcript?.videoId);
+  }, [transcript?.videoId, prefetchRevision]);
+
   const {
     cards,
     savedNormalizedSet,
@@ -125,12 +172,42 @@ export function App() {
       const reqId = ++translateReqIdRef.current;
       setSelectedWord(cleanWord);
       setSheetOpen(true);
-      setTranslationLoading(true);
       setTranslationError(null);
+
+      // Instant 0ms lookup from persistent browser cache or prefetched video chunk!
+      const instantHit = lookupInstantTranslation(cleanWord, contextText, transcript?.videoId);
+      if (instantHit) {
+        setTranslationLoading(false);
+        setTranslationData(instantHit.data);
+
+        if (instantHit.needsDictMeta) {
+          void fetchDictionaryMetaBrowser(instantHit.data.normalized).then((meta) => {
+            if (!meta.phonetic && !meta.audio && !meta.partOfSpeechUk) return;
+            const enriched: WordTranslation = {
+              ...instantHit.data,
+              phonetic: instantHit.data.phonetic || meta.phonetic,
+              audio: instantHit.data.audio || meta.audio,
+              partOfSpeech: instantHit.data.partOfSpeech || meta.partOfSpeech,
+              partOfSpeechUk: instantHit.data.partOfSpeechUk || meta.partOfSpeechUk,
+            };
+            savePersistentWordTranslation(
+              enriched.normalized,
+              enriched.sentence || contextText,
+              enriched
+            );
+            if (reqId === translateReqIdRef.current) {
+              setTranslationData(enriched);
+            }
+          });
+        }
+        return;
+      }
+
+      setTranslationLoading(true);
       setTranslationData(null);
 
       try {
-        const data = await translateWordSmart(cleanWord, contextText);
+        const data = await translateWordSmart(cleanWord, contextText, transcript?.videoId);
         if (reqId !== translateReqIdRef.current) return;
         setTranslationData(data);
       } catch (err) {
@@ -146,7 +223,7 @@ export function App() {
         }
       }
     },
-    [activeTab, pauseOnWordClick]
+    [activeTab, pauseOnWordClick, transcript?.videoId]
   );
 
   const handleCloseSheet = useCallback(() => {
@@ -254,6 +331,10 @@ export function App() {
             error={videoError}
             savedWords={savedNormalizedSet}
             selectedWord={selectedWord}
+            highlightedPhrases={highlightedPhrases}
+            prefetchChunks={prefetchChunks}
+            prefetchedChunkCount={prefetchedChunkCount}
+            onPrefetchChunk={handlePrefetchChunk}
             pauseOnWordClick={pauseOnWordClick}
             onTogglePauseOnWordClick={() => setPauseOnWordClick((v) => !v)}
             playerRef={playerRef}
@@ -268,6 +349,7 @@ export function App() {
             transcript={transcript}
             savedWords={savedNormalizedSet}
             selectedWord={selectedWord}
+            highlightedPhrases={highlightedPhrases}
             onWordClick={handleWordClick}
             onGoToVideo={() => setActiveTab('video')}
           />

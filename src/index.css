@@ -925,6 +925,13 @@ button {
   text-underline-offset: 3px;
 }
 
+.word-token--idiom {
+  text-decoration: underline dotted;
+  text-decoration-color: var(--coral-strong);
+  text-decoration-thickness: 1.8px;
+  text-underline-offset: 4px;
+}
+
 .word-token--spoken {
   background: var(--yellow);
   color: var(--on-accent);
