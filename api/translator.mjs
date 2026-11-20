@@ -485,70 +485,135 @@ function parseAiJson(rawText) {
   }
 }
 
-async function translateViaGemini(word, sentence) {
-  const apiKey = process.env.GEMINI_API_KEY;
+let discoveredGeminiModelsCache = { models: [], fetchedAt: 0 };
+
+async function discoverGeminiFlashModels(apiKey) {
+  const now = Date.now();
+  if (
+    discoveredGeminiModelsCache.models.length > 0 &&
+    now - discoveredGeminiModelsCache.fetchedAt < 30 * 60 * 1000
+  ) {
+    return discoveredGeminiModelsCache.models;
+  }
+  try {
+    const res = await fetchWithTimeout(
+      `https://generativelanguage.googleapis.com/v1beta/models?key=${encodeURIComponent(apiKey)}`,
+      3500
+    );
+    if (!res.ok) return [];
+    const data = await res.json();
+    const list = Array.isArray(data?.models) ? data.models : [];
+    const supported = list
+      .filter(
+        (m) =>
+          Array.isArray(m?.supportedGenerationMethods) &&
+          m.supportedGenerationMethods.includes('generateContent') &&
+          typeof m?.name === 'string' &&
+          /flash/i.test(m.name) &&
+          !/image|audio|tts|live|embedding|robotics|computer/i.test(m.name)
+      )
+      .map((m) => m.name.replace(/^models\//, ''));
+
+    // Prefer flash-lite first (fastest & highest free quota), then flash
+    supported.sort((a, b) => {
+      const aLite = /lite/i.test(a) ? 0 : 1;
+      const bLite = /lite/i.test(b) ? 0 : 1;
+      if (aLite !== bLite) return aLite - bLite;
+      return b.localeCompare(a);
+    });
+
+    const picked = supported.slice(0, 4);
+    discoveredGeminiModelsCache = { models: picked, fetchedAt: now };
+    return picked;
+  } catch {
+    return [];
+  }
+}
+
+async function translateViaGemini(word, sentence, diag) {
+  const apiKey = (process.env.GEMINI_API_KEY || '').trim();
   if (!apiKey) return null;
 
-  const models = [
-    process.env.GEMINI_MODEL || 'gemini-2.5-flash-lite',
+  const baseModels = [
+    process.env.GEMINI_MODEL?.trim(),
+    'gemini-2.5-flash-lite',
     'gemini-2.5-flash',
-    'gemini-2.0-flash',
+    'gemini-flash-latest',
   ].filter((v, i, a) => v && a.indexOf(v) === i);
 
   const prompt = buildAiPrompt(word, sentence);
 
-  for (const model of models) {
-    try {
-      const url = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(
-        model
-      )}:generateContent?key=${encodeURIComponent(apiKey)}`;
+  const tryModels = async (modelList) => {
+    for (const model of modelList) {
+      try {
+        const url = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(
+          model
+        )}:generateContent?key=${encodeURIComponent(apiKey)}`;
 
-      const generationConfig = {
-        temperature: 0.1,
-        maxOutputTokens: 512,
-        responseMimeType: 'application/json',
-      };
-      if (model.includes('2.5')) {
-        generationConfig.thinkingConfig = { thinkingBudget: 0 };
+        const res = await fetchWithTimeout(url, 6500, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            contents: [{ role: 'user', parts: [{ text: prompt }] }],
+            generationConfig: {
+              temperature: 0.1,
+              maxOutputTokens: 700,
+              responseMimeType: 'application/json',
+            },
+          }),
+        });
+        if (!res.ok) {
+          diag.push(`gemini:${model}:${res.status}`);
+          if (res.status === 401 || res.status === 403) return null;
+          continue;
+        }
+
+        const data = await res.json();
+        const text = data?.candidates?.[0]?.content?.parts?.[0]?.text || '';
+        const parsed = parseAiJson(text);
+        if (parsed && typeof parsed.translation === 'string' && parsed.translation.trim()) {
+          diag.push(`gemini:${model}:ok`);
+          return parsed;
+        }
+        diag.push(`gemini:${model}:bad_json`);
+      } catch (e) {
+        diag.push(`gemini:${model}:${e?.name || 'err'}`);
       }
+    }
+    return null;
+  };
 
-      const res = await fetchWithTimeout(url, 6500, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          contents: [{ role: 'user', parts: [{ text: prompt }] }],
-          generationConfig,
-        }),
-      });
-      if (!res.ok) continue;
+  let result = await tryModels(baseModels);
+  if (result) return result;
 
-      const data = await res.json();
-      const text = data?.candidates?.[0]?.content?.parts?.[0]?.text || '';
-      const parsed = parseAiJson(text);
-      if (parsed && typeof parsed.translation === 'string' && parsed.translation.trim()) {
-        return parsed;
-      }
-    } catch {
-      // try next Gemini model or fallback
+  // If hardcoded model names failed (e.g. 404/deprecated), dynamically discover active Flash models
+  if (diag.some((d) => d.endsWith(':404') || d.endsWith(':429'))) {
+    const discovered = (await discoverGeminiFlashModels(apiKey)).filter(
+      (m) => !baseModels.includes(m)
+    );
+    if (discovered.length > 0) {
+      result = await tryModels(discovered);
+      if (result) return result;
     }
   }
   return null;
 }
 
-async function translateViaOpenAiCompatible({ url, apiKey, model, word, sentence, extraHeaders = {} }) {
-  if (!apiKey) return null;
+async function translateViaOpenAiCompatible({ url, apiKey, model, word, sentence, extraHeaders = {}, diag, tag }) {
+  const cleanKey = (apiKey || '').trim();
+  if (!cleanKey) return null;
   try {
     const res = await fetchWithTimeout(url, 6500, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        Authorization: `Bearer ${apiKey}`,
+        Authorization: `Bearer ${cleanKey}`,
         ...extraHeaders,
       },
       body: JSON.stringify({
         model,
         temperature: 0.1,
-        max_tokens: 512,
+        max_tokens: 600,
         response_format: { type: 'json_object' },
         messages: [
           {
@@ -559,44 +624,64 @@ async function translateViaOpenAiCompatible({ url, apiKey, model, word, sentence
         ],
       }),
     });
-    if (!res.ok) return null;
+    if (!res.ok) {
+      diag.push(`${tag}:${model}:${res.status}`);
+      return null;
+    }
     const data = await res.json();
     const text = data?.choices?.[0]?.message?.content || '';
     const parsed = parseAiJson(text);
     if (parsed && typeof parsed.translation === 'string' && parsed.translation.trim()) {
+      diag.push(`${tag}:${model}:ok`);
       return parsed;
     }
+    diag.push(`${tag}:${model}:bad_json`);
     return null;
-  } catch {
+  } catch (e) {
+    diag.push(`${tag}:${model}:${e?.name || 'err'}`);
     return null;
   }
 }
 
-async function tryAiTranslation(word, sentence) {
-  if (process.env.GEMINI_API_KEY) {
-    const res = await translateViaGemini(word, sentence);
+async function tryAiTranslation(word, sentence, diag) {
+  const hasAnyKey = Boolean(
+    (process.env.GEMINI_API_KEY || '').trim() ||
+      (process.env.GROQ_API_KEY || '').trim() ||
+      (process.env.OPENROUTER_API_KEY || '').trim()
+  );
+  if (!hasAnyKey) {
+    diag.push('no_ai_key');
+    return null;
+  }
+
+  if ((process.env.GEMINI_API_KEY || '').trim()) {
+    const res = await translateViaGemini(word, sentence, diag);
     if (res) return res;
   }
 
-  if (process.env.GROQ_API_KEY) {
+  if ((process.env.GROQ_API_KEY || '').trim()) {
     const res = await translateViaOpenAiCompatible({
       url: 'https://api.groq.com/openai/v1/chat/completions',
       apiKey: process.env.GROQ_API_KEY,
-      model: process.env.GROQ_MODEL || 'llama-3.3-70b-versatile',
+      model: (process.env.GROQ_MODEL || '').trim() || 'llama-3.3-70b-versatile',
       word,
       sentence,
+      diag,
+      tag: 'groq',
     });
     if (res) return res;
   }
 
-  if (process.env.OPENROUTER_API_KEY) {
+  if ((process.env.OPENROUTER_API_KEY || '').trim()) {
     const res = await translateViaOpenAiCompatible({
       url: 'https://openrouter.ai/api/v1/chat/completions',
       apiKey: process.env.OPENROUTER_API_KEY,
-      model: process.env.OPENROUTER_MODEL || 'google/gemini-2.0-flash-001',
+      model: (process.env.OPENROUTER_MODEL || '').trim() || 'google/gemini-2.0-flash-001',
       word,
       sentence,
       extraHeaders: { 'X-Title': 'Lexivue' },
+      diag,
+      tag: 'openrouter',
     });
     if (res) return res;
   }
@@ -740,7 +825,7 @@ function extractSmartGoogleWordData(gtResult, lower, inferredPos) {
   return { mainTranslation, alternatives, partOfSpeech, partOfSpeechUk };
 }
 
-export async function translateWordEnhanced(rawWord, sentence = '') {
+export async function translateWordEnhanced(rawWord, sentence = '', options = {}) {
   const cleaned = String(rawWord || '')
     .trim()
     .replace(/^[^a-zA-Z'-]+|[^a-zA-Z'-]+$/g, '');
@@ -753,16 +838,18 @@ export async function translateWordEnhanced(rawWord, sentence = '') {
   const trimmedSentence = String(sentence || '').replace(/\s+/g, ' ').trim().slice(0, 460);
   const cacheKey = `${lower}::${trimmedSentence}`;
 
-  if (translateCache.has(cacheKey)) {
+  if (!options.debug && translateCache.has(cacheKey)) {
     return { status: 200, body: { ...translateCache.get(cacheKey), word: cleaned } };
   }
+
+  const diag = [];
 
   // Always fetch pronunciation / phonetics in parallel (fast & cached by browser/edge)
   const inferredPos = inferContextPos(lower, trimmedSentence);
   const dictMetaPromise = fetchDictionaryMeta(lower, inferredPos);
 
   // TIER 1: Try AI contextual model (Gemini / Groq / OpenRouter) if API key is configured
-  const aiResult = await tryAiTranslation(cleaned, trimmedSentence);
+  const aiResult = await tryAiTranslation(cleaned, trimmedSentence, diag);
   if (aiResult) {
     const dictMeta = await dictMetaPromise;
     const cleanAlts = Array.isArray(aiResult.alternatives)
@@ -801,7 +888,7 @@ export async function translateWordEnhanced(rawWord, sentence = '') {
     };
 
     setCache(cacheKey, payload);
-    return { status: 200, body: payload };
+    return { status: 200, body: options.debug ? { ...payload, aiDiag: diag } : payload };
   }
 
   // TIER 2: Upgraded Smart Keyless Engine (no API key needed, context-aware POS + dt=at + idiom detector)
@@ -870,5 +957,5 @@ export async function translateWordEnhanced(rawWord, sentence = '') {
   };
 
   setCache(cacheKey, payload);
-  return { status: 200, body: payload };
+  return { status: 200, body: options.debug ? { ...payload, aiDiag: diag } : payload };
 }

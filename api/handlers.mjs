@@ -1079,8 +1079,8 @@ async function fetchWithTimeout(url, timeoutMs = 3000, options = {}) {
   }
 }
 
-export async function translateWord(rawWord, sentence = '') {
-  return translateWordEnhanced(rawWord, sentence);
+export async function translateWord(rawWord, sentence = '', options = {}) {
+  return translateWordEnhanced(rawWord, sentence, options);
 }
 
 export async function handleApiRequest(req, res) {
