@@ -1,5 +1,5 @@
-import React, { useCallback, useRef, useState } from 'react';
-import { PlaySquare, BookOpen, Layers, Check } from 'lucide-react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
+import { PlaySquare, BookOpen, Layers, Check, Sun, Moon } from 'lucide-react';
 import { ActiveTab, VideoTranscript, WordTranslation } from './types';
 import { useFlashcards } from './hooks/useFlashcards';
 import { YouTubePlayerHandle } from './components/YouTubePlayer';
@@ -9,8 +9,41 @@ import { FlashcardsView } from './components/FlashcardsView';
 import { TranslationSheet } from './components/TranslationSheet';
 import { fetchTranscriptSmart, translateWordSmart } from './utils/clientApi';
 
+type ThemeMode = 'light' | 'dark';
+
+function getInitialTheme(): ThemeMode {
+  if (typeof window === 'undefined') return 'light';
+  const attr = document.documentElement.getAttribute('data-theme');
+  if (attr === 'dark' || attr === 'light') return attr;
+  try {
+    const saved = localStorage.getItem('lexivue_theme');
+    if (saved === 'dark' || saved === 'light') return saved;
+  } catch {
+    // ignore storage errors
+  }
+  return window.matchMedia?.('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
+}
+
 export function App() {
+  const [theme, setTheme] = useState<ThemeMode>(getInitialTheme);
   const [activeTab, setActiveTab] = useState<ActiveTab>('video');
+
+  useEffect(() => {
+    document.documentElement.setAttribute('data-theme', theme);
+    try {
+      localStorage.setItem('lexivue_theme', theme);
+    } catch {
+      // ignore storage errors
+    }
+    const meta = document.querySelector('meta[name="theme-color"]');
+    if (meta) {
+      meta.setAttribute('content', theme === 'dark' ? '#0E0E11' : '#FFFFFF');
+    }
+  }, [theme]);
+
+  const toggleTheme = useCallback(() => {
+    setTheme((prev) => (prev === 'dark' ? 'light' : 'dark'));
+  }, []);
 
   // Video & transcript state
   const [urlInput, setUrlInput] = useState('');
@@ -185,16 +218,28 @@ export function App() {
             </button>
           </nav>
 
-          {/* Compact mobile saved indicator in header */}
-          <button
-            type="button"
-            className="mobile-cards-chip"
-            onClick={() => setActiveTab('cards')}
-            aria-label="Перейти до карточок"
-          >
-            <Layers size={15} />
-            <span>{cards.length}</span>
-          </button>
+          {/* Right Header Controls: Theme toggle + Mobile cards chip */}
+          <div className="header-actions">
+            <button
+              type="button"
+              className="theme-toggle-btn"
+              onClick={toggleTheme}
+              aria-label={theme === 'dark' ? 'Увімкнути світлу тему' : 'Увімкнути темну тему'}
+              title={theme === 'dark' ? 'Світла тема' : 'Темна тема'}
+            >
+              {theme === 'dark' ? <Sun size={17} /> : <Moon size={17} />}
+            </button>
+
+            <button
+              type="button"
+              className="mobile-cards-chip"
+              onClick={() => setActiveTab('cards')}
+              aria-label="Перейти до карточок"
+            >
+              <Layers size={15} />
+              <span>{cards.length}</span>
+            </button>
+          </div>
         </div>
       </header>
 
