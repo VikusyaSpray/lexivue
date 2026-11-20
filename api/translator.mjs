@@ -530,14 +530,16 @@ async function discoverGeminiFlashModels(apiKey) {
   }
 }
 
+let lastWorkingGeminiModel = '';
+
 async function translateViaGemini(word, sentence, diag) {
   const apiKey = (process.env.GEMINI_API_KEY || '').trim();
   if (!apiKey) return null;
 
   const baseModels = [
     process.env.GEMINI_MODEL?.trim(),
-    'gemini-2.5-flash-lite',
-    'gemini-2.5-flash',
+    lastWorkingGeminiModel,
+    'gemini-flash-lite-latest',
     'gemini-flash-latest',
   ].filter((v, i, a) => v && a.indexOf(v) === i);
 
@@ -550,7 +552,7 @@ async function translateViaGemini(word, sentence, diag) {
           model
         )}:generateContent?key=${encodeURIComponent(apiKey)}`;
 
-        const res = await fetchWithTimeout(url, 6500, {
+        const res = await fetchWithTimeout(url, 5500, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
@@ -572,6 +574,7 @@ async function translateViaGemini(word, sentence, diag) {
         const text = data?.candidates?.[0]?.content?.parts?.[0]?.text || '';
         const parsed = parseAiJson(text);
         if (parsed && typeof parsed.translation === 'string' && parsed.translation.trim()) {
+          lastWorkingGeminiModel = model;
           diag.push(`gemini:${model}:ok`);
           return parsed;
         }
