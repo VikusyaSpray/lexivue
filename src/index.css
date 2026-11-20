@@ -50,44 +50,44 @@
 
 :root[data-theme='dark'] {
   color-scheme: dark;
-  --bg: #0e0e11;
-  --surface: #17171c;
-  --surface-hover: #212128;
-  --surface-elevated: #22222a;
-  --ink: #f4f4f6;
-  --ink-secondary: #a7a7b3;
-  --ink-muted: #767684;
-  --ink-inverse: #111114;
-  --ink-hover: #e2e2e8;
-  --on-accent: #141416;
-  --border: #26262f;
-  --border-strong: #373744;
+  --bg: #18181d;
+  --surface: #212128;
+  --surface-hover: #2a2a33;
+  --surface-elevated: #2c2c36;
+  --ink: #ececf1;
+  --ink-secondary: #adadb9;
+  --ink-muted: #80808f;
+  --ink-inverse: #16161a;
+  --ink-hover: #dcdce4;
+  --on-accent: #16161a;
+  --border: #2f2f3a;
+  --border-strong: #40404f;
 
-  /* Warm pastel accents calibrated for dark surfaces */
+  /* Warm pastel accents calibrated for soft dark graphite */
   --yellow: #f6dc74;
   --yellow-strong: #ecc94b;
-  --yellow-soft: #221f13;
+  --yellow-soft: #29261b;
   --yellow-border: rgba(246, 220, 116, 0.34);
   --coral: #ff9f8c;
   --coral-strong: #f68773;
-  --coral-soft: #271917;
+  --coral-soft: #2f211f;
   --coral-border: rgba(255, 159, 140, 0.36);
 
   /* Glass & overlays */
-  --header-bg: rgba(14, 14, 17, 0.86);
-  --tabbar-bg: rgba(14, 14, 17, 0.92);
-  --backdrop: rgba(0, 0, 0, 0.66);
-  --handle: #3e3e4b;
-  --flashcard-back: linear-gradient(180deg, #1b1b21 0%, #242014 100%);
-  --flashcard-ctx-bg: rgba(14, 14, 17, 0.62);
-  --phrase-speak-bg: rgba(255, 255, 255, 0.1);
+  --header-bg: rgba(24, 24, 29, 0.88);
+  --tabbar-bg: rgba(24, 24, 29, 0.93);
+  --backdrop: rgba(10, 10, 14, 0.62);
+  --handle: #4a4a5a;
+  --flashcard-back: linear-gradient(180deg, #23232b 0%, #2c281c 100%);
+  --flashcard-ctx-bg: rgba(24, 24, 29, 0.58);
+  --phrase-speak-bg: rgba(255, 255, 255, 0.11);
   --focus-ring: rgba(246, 220, 116, 0.26);
 
-  --shadow-xs: 0 1px 2px rgba(0, 0, 0, 0.35);
-  --shadow-sm: 0 4px 18px rgba(0, 0, 0, 0.4);
-  --shadow-md: 0 14px 36px rgba(0, 0, 0, 0.55);
-  --shadow-modal: 0 24px 60px rgba(0, 0, 0, 0.65);
-  --shadow-sheet: 0 -10px 42px rgba(0, 0, 0, 0.6);
+  --shadow-xs: 0 1px 2px rgba(0, 0, 0, 0.28);
+  --shadow-sm: 0 4px 18px rgba(0, 0, 0, 0.34);
+  --shadow-md: 0 14px 36px rgba(0, 0, 0, 0.46);
+  --shadow-modal: 0 24px 60px rgba(0, 0, 0, 0.56);
+  --shadow-sheet: 0 -10px 42px rgba(0, 0, 0, 0.52);
 }
 
 *,
