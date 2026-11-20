@@ -647,7 +647,7 @@ async function translateViaOpenAiCompatible({ url, apiKey, model, word, sentence
   }
 }
 
-async function tryAiTranslation(word, sentence, diag) {
+async function tryAiTranslation(word, sentence, diag, options = {}) {
   const hasAnyKey = Boolean(
     (process.env.GEMINI_API_KEY || '').trim() ||
       (process.env.GROQ_API_KEY || '').trim() ||
@@ -658,22 +658,30 @@ async function tryAiTranslation(word, sentence, diag) {
     return null;
   }
 
-  if ((process.env.GEMINI_API_KEY || '').trim()) {
+  if (!options.forceGroq && (process.env.GEMINI_API_KEY || '').trim()) {
     const res = await translateViaGemini(word, sentence, diag);
     if (res) return res;
   }
 
   if ((process.env.GROQ_API_KEY || '').trim()) {
-    const res = await translateViaOpenAiCompatible({
-      url: 'https://api.groq.com/openai/v1/chat/completions',
-      apiKey: process.env.GROQ_API_KEY,
-      model: (process.env.GROQ_MODEL || '').trim() || 'llama-3.3-70b-versatile',
-      word,
-      sentence,
-      diag,
-      tag: 'groq',
-    });
-    if (res) return res;
+    const groqModels = [
+      (process.env.GROQ_MODEL || '').trim(),
+      'llama-3.3-70b-versatile',
+      'llama-3.1-8b-instant',
+    ].filter((v, i, a) => v && a.indexOf(v) === i);
+
+    for (const model of groqModels) {
+      const res = await translateViaOpenAiCompatible({
+        url: 'https://api.groq.com/openai/v1/chat/completions',
+        apiKey: process.env.GROQ_API_KEY,
+        model,
+        word,
+        sentence,
+        diag,
+        tag: 'groq',
+      });
+      if (res) return res;
+    }
   }
 
   if ((process.env.OPENROUTER_API_KEY || '').trim()) {
@@ -853,7 +861,7 @@ export async function translateWordEnhanced(rawWord, sentence = '', options = {}
   const dictMetaPromise = fetchDictionaryMeta(lower, inferredPos);
 
   // TIER 1: Try AI contextual model (Gemini / Groq / OpenRouter) if API key is configured
-  const aiResult = await tryAiTranslation(cleaned, trimmedSentence, diag);
+  const aiResult = await tryAiTranslation(cleaned, trimmedSentence, diag, options);
   if (aiResult) {
     const dictMeta = await dictMetaPromise;
     const cleanAlts = Array.isArray(aiResult.alternatives)
@@ -1080,35 +1088,45 @@ async function callAiBatchJson(prompt) {
 
   const groqKey = (process.env.GROQ_API_KEY || '').trim();
   if (groqKey) {
-    try {
-      const res = await fetchWithTimeout('https://api.groq.com/openai/v1/chat/completions', 8500, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${groqKey}`,
-        },
-        body: JSON.stringify({
-          model: (process.env.GROQ_MODEL || '').trim() || 'llama-3.3-70b-versatile',
-          temperature: 0.1,
-          max_tokens: 3000,
-          response_format: { type: 'json_object' },
-          messages: [
-            {
-              role: 'system',
-              content: 'You are an English-to-Ukrainian subtitle translator and dictionary. Reply strictly with valid JSON.',
-            },
-            { role: 'user', content: prompt },
-          ],
-        }),
-      });
-      if (res.ok) {
+    const groqModels = [
+      (process.env.GROQ_MODEL || '').trim(),
+      'llama-3.3-70b-versatile',
+      'llama-3.1-8b-instant',
+    ].filter((v, i, a) => v && a.indexOf(v) === i);
+
+    for (const model of groqModels) {
+      try {
+        const res = await fetchWithTimeout('https://api.groq.com/openai/v1/chat/completions', 8500, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            Authorization: `Bearer ${groqKey}`,
+          },
+          body: JSON.stringify({
+            model,
+            temperature: 0.1,
+            max_tokens: 3000,
+            response_format: { type: 'json_object' },
+            messages: [
+              {
+                role: 'system',
+                content: 'You are an English-to-Ukrainian subtitle translator and dictionary. Reply strictly with valid JSON.',
+              },
+              { role: 'user', content: prompt },
+            ],
+          }),
+        });
+        if (!res.ok) {
+          if (res.status === 401 || res.status === 403) break;
+          continue;
+        }
         const data = await res.json();
         const text = data?.choices?.[0]?.message?.content || '';
         const parsed = parseAiJson(text);
         if (parsed && typeof parsed === 'object') return parsed;
+      } catch {
+        // try next Groq model
       }
-    } catch {
-      // fall through
     }
   }
 

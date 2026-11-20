@@ -14,8 +14,9 @@ export default async function handler(req, res) {
     const word = req.query?.word || parsedUrl.searchParams.get('word') || '';
     const sentence = req.query?.sentence || parsedUrl.searchParams.get('sentence') || '';
     const debug = (req.query?.debug || parsedUrl.searchParams.get('debug') || '') === '1';
+    const forceGroq = (req.query?.force || parsedUrl.searchParams.get('force') || '') === 'groq';
 
-    const result = await translateWord(word, sentence, { debug });
+    const result = await translateWord(word, sentence, { debug, forceGroq });
     res.status(result.status).json(result.body);
   } catch (err) {
     console.error('Translate API error:', err);
