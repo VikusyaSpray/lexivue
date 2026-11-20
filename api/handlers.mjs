@@ -28,18 +28,40 @@ function endsWithDanglingWord(text) {
   return DANGLING_END_WORDS.has(norm);
 }
 
+function isSoundTagOnly(text) {
+  return /^(?:\[[^\]]+\]|\([^)]+\)|♪[\s♪]*♪?|\s)+$/.test(String(text || '').trim());
+}
+
 function mergeSubtitleFragments(segments) {
+  // First clamp overlapping ends so consecutive cues never fight for activeIndex
+  const normalized = segments.map((s) => ({ ...s }));
+  for (let i = 0; i < normalized.length - 1; i++) {
+    const cur = normalized[i];
+    const next = normalized[i + 1];
+    if (next.start > cur.start && cur.end > next.start) {
+      cur.end = Number(next.start.toFixed(2));
+      if (Array.isArray(cur.wordTimings) && cur.wordTimings.length > 0) {
+        cur.wordTimings = cur.wordTimings.map((wt) => ({
+          start: Math.min(wt.start, cur.end),
+          end: Math.min(wt.end, cur.end),
+        }));
+      }
+    }
+  }
+
   const merged = [];
-  for (const seg of segments) {
+  for (const seg of normalized) {
     const prev = merged[merged.length - 1];
     const prevWords = prev ? prev.text.split(/\s+/).length : 0;
     const curWords = seg.text.split(/\s+/).length;
     const gap = prev ? seg.start - prev.end : 99;
     const prevEndsSentence = prev ? /[.!?]["'”)\]]*$/.test(prev.text.trim()) : true;
     const danglingSplit = prev ? endsWithDanglingWord(prev.text) : false;
+    const soundBoundary = isSoundTagOnly(seg.text) || (prev && isSoundTagOnly(prev.text));
 
     if (
       prev &&
+      !soundBoundary &&
       !prevEndsSentence &&
       gap < 0.75 &&
       prevWords + curWords <= 15 &&
@@ -353,8 +375,8 @@ function alignSegmentsWithAsr(segments, asrWords) {
     const specs = extractWordSpecs(seg.text);
     if (specs.length === 0) return { ...seg, wordTimings: [] };
 
-    const winStart = seg.start - 1.4;
-    const winEnd = seg.end + 1.4;
+    const winStart = seg.start - 0.65;
+    const winEnd = seg.end + 0.65;
 
     // Advance cursor to window start (keeping slight lookback)
     while (asrCursor > 0 && asrWords[asrCursor - 1].start >= winStart) {
@@ -366,18 +388,26 @@ function alignSegmentsWithAsr(segments, asrWords) {
 
     const matchedStarts = new Array(specs.length).fill(null);
     let localPos = asrCursor;
+    let lastMatchedTime = seg.start;
 
     for (let i = 0; i < specs.length; i++) {
       const targetNorm = specs[i].norm;
-      const searchLimit = Math.min(asrWords.length, localPos + 10);
+      // Shorter stopwords get tighter lookahead so they don't jump ahead falsely
+      const lookahead = targetNorm.length <= 2 ? 3 : 6;
+      const searchLimit = Math.min(asrWords.length, localPos + lookahead);
       for (let j = localPos; j < searchLimit; j++) {
         if (asrWords[j].start > winEnd) break;
+        if (asrWords[j].start - lastMatchedTime > 2.8) break;
         const cand = asrWords[j].norm;
         if (
           cand === targetNorm ||
-          (cand.length >= 4 && targetNorm.length >= 4 && (cand.startsWith(targetNorm) || targetNorm.startsWith(cand)))
+          (cand.length >= 4 &&
+            targetNorm.length >= 4 &&
+            (cand.startsWith(targetNorm) || targetNorm.startsWith(cand)))
         ) {
-          matchedStarts[i] = asrWords[j].start;
+          const clamped = Math.max(seg.start - 0.3, Math.min(seg.end + 0.1, asrWords[j].start));
+          matchedStarts[i] = clamped;
+          lastMatchedTime = clamped;
           localPos = j + 1;
           break;
         }
@@ -406,14 +436,16 @@ function alignSegmentsWithAsr(segments, asrWords) {
       while (i < starts.length && starts[i] === null) i++;
       const gapEndIdx = i; // exclusive
 
-      const leftTime = gapStartIdx > 0 && starts[gapStartIdx - 1] !== null
-        ? starts[gapStartIdx - 1] + 0.14
-        : seg.start;
-      const rightTime = gapEndIdx < starts.length && starts[gapEndIdx] !== null
-        ? starts[gapEndIdx]
-        : safeEnd;
+      const leftTime =
+        gapStartIdx > 0 && starts[gapStartIdx - 1] !== null
+          ? starts[gapStartIdx - 1] + 0.12
+          : seg.start;
+      const rightTime =
+        gapEndIdx < starts.length && starts[gapEndIdx] !== null
+          ? starts[gapEndIdx]
+          : safeEnd;
 
-      const span = Math.max(0.08 * (gapEndIdx - gapStartIdx), rightTime - leftTime);
+      const span = Math.max(0.06 * (gapEndIdx - gapStartIdx), rightTime - leftTime);
       let gapWeight = 0;
       for (let k = gapStartIdx; k < gapEndIdx; k++) gapWeight += specs[k].weight;
 
@@ -424,15 +456,15 @@ function alignSegmentsWithAsr(segments, asrWords) {
       }
     }
 
-    // Build monotonically non-decreasing [start, end] pairs
+    // Build monotonically non-decreasing [start, end] pairs strictly bounded by safeEnd
     const wordTimings = starts.map((st, idx) => {
-      const clampedStart = Number(st.toFixed(3));
-      const nextSt = idx < starts.length - 1 ? starts[idx + 1] : Math.max(safeEnd, clampedStart + 0.25);
-      const clampedEnd = Number(Math.max(clampedStart + 0.06, nextSt).toFixed(3));
+      const clampedStart = Number(Math.min(st, safeEnd - 0.05).toFixed(3));
+      const nextSt =
+        idx < starts.length - 1 ? Math.min(starts[idx + 1], safeEnd) : safeEnd;
+      const clampedEnd = Number(Math.max(clampedStart + 0.05, nextSt).toFixed(3));
       return { start: clampedStart, end: clampedEnd };
     });
 
-    // Update global cursor smoothly
     asrCursor = Math.max(asrCursor, localPos - 2);
 
     return {
@@ -462,7 +494,7 @@ function parseJson3Captions(json) {
 
     const nextStartMs = rawEvents[i + 1]?.tStartMs;
     let durationMs = ev.dDurationMs ?? 3000;
-    if (nextStartMs && nextStartMs > startMs && durationMs > nextStartMs - startMs + 500) {
+    if (nextStartMs && nextStartMs > startMs && durationMs > nextStartMs - startMs) {
       durationMs = nextStartMs - startMs;
     }
     const endMs = startMs + Math.max(durationMs, 400);
@@ -533,28 +565,47 @@ function extractInlineVttWordTimings(line, cueStart, cueEnd, cleanText) {
   const targetSpecs = extractWordSpecs(cleanText);
   if (targetSpecs.length === 0) return [];
 
-  // Parse segments separated by <HH:MM:SS.mmm> tags
-  const tagRegex = /<(\d{2}:\d{2}:\d{2}\.\d{3})>/g;
-  const rawWordStarts = [];
-  let lastIdx = 0;
+  // Map every character of the decoded text to its exact inline timestamp so contractions/hyphens
+  // crossing <c> tags never break word count alignment!
+  const tagRegex = /<(\d{2}:\d{2}:\d{2}\.\d{3})>|<[^>]+>/g;
+  let plain = '';
+  const charTimes = [];
   let currentTime = cueStart;
+  let lastIdx = 0;
   let match;
 
-  const pushChunk = (chunkText, t) => {
-    const plain = decodeHtmlEntities(chunkText.replace(/<[^>]+>/g, ''));
-    if (!plain) return;
-    const words = extractWordSpecs(plain);
-    for (let i = 0; i < words.length; i++) {
-      rawWordStarts.push(t + i * 0.14);
+  const appendPiece = (rawPiece, t) => {
+    if (!rawPiece) return;
+    const decoded = rawPiece
+      .replace(/&amp;/g, '&')
+      .replace(/&lt;/g, '<')
+      .replace(/&gt;/g, '>')
+      .replace(/&quot;/g, '"')
+      .replace(/&#39;/g, "'")
+      .replace(/&apos;/g, "'")
+      .replace(/&#(\d+);/g, (_, num) => String.fromCharCode(Number(num)))
+      .replace(/\u200b/g, '');
+    for (let i = 0; i < decoded.length; i++) {
+      plain += decoded[i];
+      charTimes.push(t);
     }
   };
 
   while ((match = tagRegex.exec(line)) !== null) {
-    pushChunk(line.slice(lastIdx, match.index), currentTime);
-    currentTime = parseVttTimestamp(match[1]);
+    appendPiece(line.slice(lastIdx, match.index), currentTime);
+    if (match[1]) {
+      currentTime = parseVttTimestamp(match[1]);
+    }
     lastIdx = match.index + match[0].length;
   }
-  pushChunk(line.slice(lastIdx), currentTime);
+  appendPiece(line.slice(lastIdx), currentTime);
+
+  const rawWordStarts = [];
+  WORD_REGEX.lastIndex = 0;
+  let wm;
+  while ((wm = WORD_REGEX.exec(plain)) !== null) {
+    rawWordStarts.push(charTimes[wm.index] ?? cueStart);
+  }
 
   if (rawWordStarts.length !== targetSpecs.length) {
     return buildWeightedTimings(cleanText, cueStart, cueEnd);
@@ -562,12 +613,20 @@ function extractInlineVttWordTimings(line, cueStart, cueEnd, cleanText) {
 
   return rawWordStarts.map((wStart, idx) => {
     const nextT = idx < rawWordStarts.length - 1 ? rawWordStarts[idx + 1] : cueEnd;
-    const end = Math.max(wStart + 0.07, Math.min(cueEnd, nextT));
+    const end = Math.max(wStart + 0.06, Math.min(cueEnd, nextT));
     return {
       start: Number(wStart.toFixed(3)),
       end: Number(end.toFixed(3)),
     };
   });
+}
+
+function normalizeForDupCheck(str) {
+  return String(str || '')
+    .toLowerCase()
+    .replace(/[^\w\s']/g, '')
+    .replace(/\s+/g, ' ')
+    .trim();
 }
 
 function parseVttCaptions(vttText) {
@@ -614,16 +673,26 @@ function parseVttCaptions(vttText) {
         .filter(Boolean);
       if (cleanedLines.length === 0) continue;
 
-      // Avoid repeating the previous rolling line
-      const prevText = segments[segments.length - 1]?.text || '';
-      const filtered =
-        cleanedLines.length > 1 && prevText && cleanedLines[0] === prevText
-          ? cleanedLines.slice(1)
-          : cleanedLines;
+      // Avoid repeating the previous rolling line (exact or suffix match)
+      const prevNorm = normalizeForDupCheck(segments[segments.length - 1]?.text || '');
+      const firstNorm = normalizeForDupCheck(cleanedLines[0]);
+      const isRepeatedTopLine =
+        cleanedLines.length > 1 &&
+        prevNorm &&
+        firstNorm &&
+        (prevNorm === firstNorm || prevNorm.endsWith(firstNorm));
+
+      const filtered = isRepeatedTopLine ? cleanedLines.slice(1) : cleanedLines;
 
       text = filtered.join(' ').replace(/\s+/g, ' ').trim();
       if (!text) continue;
-      wordTimings = buildWeightedTimings(text, start, end);
+      // Avoid stretching a single short word across 8 seconds of silence/applause
+      const wordCount = extractWordSpecs(text).length;
+      const effectiveEnd =
+        wordCount > 0 && wordCount <= 3 && end - start > 3.5
+          ? Math.min(end, start + Math.max(1.4, wordCount * 0.7))
+          : end;
+      wordTimings = buildWeightedTimings(text, start, effectiveEnd);
     }
 
     if (segments.length > 0 && segments[segments.length - 1].text === text) {
@@ -640,6 +709,25 @@ function parseVttCaptions(vttText) {
   }
 
   return mergeSubtitleFragments(segments);
+}
+
+function extractAsrWordStreamFromVtt(vttText) {
+  const segs = parseVttCaptions(vttText);
+  const words = [];
+  for (const seg of segs) {
+    const specs = extractWordSpecs(seg.text);
+    const timings = seg.wordTimings || [];
+    for (let i = 0; i < specs.length; i++) {
+      const wt = timings[i];
+      if (!wt) continue;
+      words.push({
+        norm: specs[i].norm,
+        start: wt.start,
+        end: wt.end,
+      });
+    }
+  }
+  return words;
 }
 
 async function fetchOembedMeta(videoId) {
@@ -699,8 +787,8 @@ async function fetchViaInvidious(videoId) {
       const captions = Array.isArray(listData?.captions) ? listData.captions : [];
       if (captions.length === 0) continue;
 
-      // Build ordered candidate list: manual English -> auto-generated English -> any English -> first available
-      const isAuto = (c) => String(c.label || '').toLowerCase().includes('auto');
+      // Build ordered candidate list: manual English -> auto-generated English -> first available
+      const isAuto = (c) => /auto|автомат/i.test(String(c.label || ''));
       const candidates = [
         ...captions.filter((c) => c.languageCode === 'en' && !isAuto(c)),
         ...captions.filter((c) => c.languageCode?.startsWith('en') && c.languageCode !== 'en' && !isAuto(c)),
@@ -709,16 +797,40 @@ async function fetchViaInvidious(videoId) {
         ...captions.slice(0, 1),
       ].filter((c, i, arr) => c?.url && arr.findIndex((x) => x.url === c.url) === i);
 
+      const asrCandidate = captions.find(
+        (c) => c.languageCode?.startsWith('en') && isAuto(c) && c.url
+      );
+
       for (const chosen of candidates) {
         try {
           const vttUrl = chosen.url.startsWith('http') ? chosen.url : `${host}${chosen.url}`;
-          const vttRes = await fetchWithTimeout(vttUrl, 6000);
+          const chosenIsAuto = isAuto(chosen);
+
+          const asrPromise =
+            !chosenIsAuto && asrCandidate && asrCandidate.url !== chosen.url
+              ? fetchWithTimeout(
+                  asrCandidate.url.startsWith('http') ? asrCandidate.url : `${host}${asrCandidate.url}`,
+                  4500
+                )
+                  .then((r) => (r.ok ? r.text() : ''))
+                  .then((txt) => (txt && txt.length > 20 ? extractAsrWordStreamFromVtt(txt) : null))
+                  .catch(() => null)
+              : Promise.resolve(null);
+
+          const [vttRes, asrWords] = await Promise.all([
+            fetchWithTimeout(vttUrl, 6000),
+            asrPromise,
+          ]);
           if (!vttRes.ok) continue;
           const vttText = await vttRes.text();
           if (!vttText || vttText.length < 20) continue;
 
-          const segments = parseVttCaptions(vttText);
+          let segments = parseVttCaptions(vttText);
           if (segments.length === 0) continue;
+
+          if (asrWords && asrWords.length > 0) {
+            segments = alignSegmentsWithAsr(segments, asrWords);
+          }
 
           return {
             videoId,
@@ -726,7 +838,7 @@ async function fetchViaInvidious(videoId) {
             author: meta.author,
             lengthSeconds: 0,
             language: chosen.languageCode || 'en',
-            isAutoGenerated: isAuto(chosen),
+            isAutoGenerated: chosenIsAuto,
             segments,
           };
         } catch {
