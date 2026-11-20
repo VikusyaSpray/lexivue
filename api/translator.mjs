@@ -539,6 +539,7 @@ async function translateViaGemini(word, sentence, diag) {
   const baseModels = [
     process.env.GEMINI_MODEL?.trim(),
     lastWorkingGeminiModel,
+    'gemini-3.5-flash-lite',
     'gemini-flash-lite-latest',
     'gemini-flash-latest',
   ].filter((v, i, a) => v && a.indexOf(v) === i);
@@ -589,8 +590,8 @@ async function translateViaGemini(word, sentence, diag) {
   let result = await tryModels(baseModels);
   if (result) return result;
 
-  // If hardcoded model names failed (e.g. 404/deprecated), dynamically discover active Flash models
-  if (diag.some((d) => d.endsWith(':404') || d.endsWith(':429'))) {
+  // If hardcoded model names failed (e.g. 404/429/timeout), dynamically discover active Flash models
+  if (diag.some((d) => /:(404|429|AbortError|400)$/.test(d))) {
     const discovered = (await discoverGeminiFlashModels(apiKey)).filter(
       (m) => !baseModels.includes(m)
     );
@@ -1018,15 +1019,16 @@ function buildBatchPrefetchPrompt(sentences, targetWords) {
 async function callAiBatchJson(prompt) {
   const geminiKey = (process.env.GEMINI_API_KEY || '').trim();
   if (geminiKey) {
-    const models = [
+    const baseModels = [
       process.env.GEMINI_MODEL?.trim(),
       lastWorkingGeminiModel,
+      'gemini-3.5-flash-lite',
       'gemini-flash-lite-latest',
       'gemini-flash-latest',
     ].filter((v, i, a) => v && a.indexOf(v) === i);
 
-    for (const model of models) {
-      for (const disableThinking of [true, false]) {
+    const tryBatchModels = async (modelList) => {
+      for (const model of modelList) {
         try {
           const url = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(
             model
@@ -1036,10 +1038,7 @@ async function callAiBatchJson(prompt) {
             maxOutputTokens: 4200,
             responseMimeType: 'application/json',
           };
-          if (disableThinking) {
-            generationConfig.thinkingConfig = { thinkingBudget: 0 };
-          }
-          const res = await fetchWithTimeout(url, 11000, {
+          const res = await fetchWithTimeout(url, 9500, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
@@ -1048,10 +1047,8 @@ async function callAiBatchJson(prompt) {
             }),
           });
           if (!res.ok) {
-            // Only retry without thinkingConfig if 400 Bad Request
-            if (res.status === 400 && disableThinking) continue;
-            if (res.status === 401 || res.status === 403) return null;
-            break;
+            if (res.status === 401 || res.status === 403) return 'auth_err';
+            continue;
           }
           const data = await res.json();
           const text = data?.candidates?.[0]?.content?.parts?.[0]?.text || '';
@@ -1060,10 +1057,23 @@ async function callAiBatchJson(prompt) {
             lastWorkingGeminiModel = model;
             return parsed;
           }
-          break;
         } catch {
-          break;
+          // try next model
         }
+      }
+      return null;
+    };
+
+    const firstTry = await tryBatchModels(baseModels);
+    if (firstTry && firstTry !== 'auth_err') return firstTry;
+
+    if (firstTry !== 'auth_err') {
+      const discovered = (await discoverGeminiFlashModels(geminiKey)).filter(
+        (m) => !baseModels.includes(m)
+      );
+      if (discovered.length > 0) {
+        const secondTry = await tryBatchModels(discovered);
+        if (secondTry && secondTry !== 'auth_err') return secondTry;
       }
     }
   }
