@@ -1027,6 +1027,13 @@ button {
   border-bottom: 1px solid var(--border);
 }
 
+.reading-badges {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+}
+
 .reading-title {
   margin: 10px 0 6px;
   font-family: 'Plus Jakarta Sans', 'Inter', sans-serif;

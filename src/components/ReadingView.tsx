@@ -2,7 +2,11 @@ import React, { useMemo, useState } from 'react';
 import { FileText, Video, Minus, Plus, Edit3, Check } from 'lucide-react';
 import { VideoTranscript } from '../types';
 import { SAMPLE_READING_TEXT } from '../data/presets';
-import { groupSegmentsIntoParagraphs, extractSentenceAroundWord } from '../utils/text';
+import {
+  groupSegmentsIntoParagraphs,
+  extractSentenceAroundWord,
+  transcriptNeedsPunctuation,
+} from '../utils/text';
 import { InteractiveText } from './InteractiveText';
 
 interface ReadingViewProps {
@@ -29,6 +33,11 @@ export const ReadingView: React.FC<ReadingViewProps> = ({
 
   const videoParagraphs = useMemo(
     () => (transcript ? groupSegmentsIntoParagraphs(transcript.segments) : []),
+    [transcript]
+  );
+
+  const isAutoPunctuated = useMemo(
+    () => (transcript ? transcriptNeedsPunctuation(transcript.segments) : false),
     [transcript]
   );
 
@@ -94,7 +103,12 @@ export const ReadingView: React.FC<ReadingViewProps> = ({
           <article className="reading-card">
             <div className="reading-card__header">
               <div>
-                <span className="badge badge--yellow">Субтитри для читання</span>
+                <div className="reading-badges">
+                  <span className="badge badge--yellow">Субтитри для читання</span>
+                  {isAutoPunctuated && (
+                    <span className="badge badge--neutral">авто-пунктуація</span>
+                  )}
+                </div>
                 <h1 className="reading-title">{transcript.title}</h1>
                 <p className="reading-hint">
                   Натисніть на будь-яке слово у тексті, щоб перекласти його українською.

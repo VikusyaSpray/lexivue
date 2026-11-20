@@ -32,8 +32,409 @@ export function formatTime(totalSeconds: number): string {
   return `${mins}:${String(secs).padStart(2, '0')}`;
 }
 
+const READING_NOISE_TAG_RE = /\[[^\]]*\]|\((?:laughter|applause|music|cheering|sighs|inaudible|crosstalk)\)|♪+/gi;
+
+const NO_BREAK_AFTER_WORDS = new Set([
+  'a', 'an', 'the', 'to', 'of', 'in', 'on', 'at', 'for', 'with', 'from', 'by', 'as',
+  'into', 'onto', 'about', 'through', 'under', 'over', 'between', 'among', 'than',
+  'before', 'after', 'during', 'without', 'within', 'against', 'toward', 'towards',
+  'and', 'or', 'but', 'nor', 'if', 'when', 'while', 'where', 'that', 'which', 'who',
+  'whose', 'whom', 'because', 'since', 'unless', 'until', 'although', 'though',
+  'is', 'are', 'was', 'were', 'be', 'been', 'being', 'have', 'has', 'had',
+  'do', 'does', 'did', 'will', 'would', 'can', 'could', 'should', 'must', 'may', 'might',
+  'my', 'your', 'his', 'her', 'its', 'our', 'their', 'this', 'these', 'those', 'i',
+  'very', 'so', 'too', 'quite', 'really', 'just', 'not', "don't", "doesn't", "didn't",
+  "won't", "can't", "couldn't", "wouldn't", "shouldn't", "isn't", "aren't", "wasn't", "weren't",
+  'no', 'some', 'any', 'every', 'each', 'all', 'both', 'many', 'much', 'more', 'most',
+  'uh', 'um', 'er', 'ah', 'thank', 'one', 'two', 'three', 'four', 'five', 'six', 'seven',
+  'eight', 'nine', 'ten', 'first', 'second', 'third', 'next', 'last', 'another', 'other',
+]);
+
+// Words that almost never start a brand-new standalone sentence after a mid-clause pause
+const NO_SENTENCE_START_WORDS = new Set([
+  'is', 'are', 'was', 'were', 'be', 'been', 'being', 'has', 'have', 'had',
+  'will', 'would', 'can', 'could', 'should', 'must', 'may', 'might',
+  'to', 'of', 'in', 'on', 'at', 'for', 'with', 'from', 'by', 'as', 'into', 'onto', 'about',
+  'out', 'up', 'off', 'down', 'away', 'back', 'over', 'through', 'than',
+  'who', 'whom', 'whose', 'which', 'that', 'and', 'or', 'but', 'nor',
+]);
+
+// Particles / prepositions that should never have a comma inserted immediately before them
+const NO_COMMA_BEFORE_WORDS = new Set([
+  'out', 'up', 'off', 'down', 'in', 'on', 'at', 'to', 'of', 'for', 'from', 'by', 'with',
+  'into', 'onto', 'over', 'away', 'back', 'about', 'than', 'is', 'are', 'was', 'were',
+  'you', 'me', 'him', 'her', 'us', 'them', 'it',
+]);
+
+const CONJUNCTION_COMMA_BEFORE = new Set([
+  'but', 'however', 'although', 'though', 'whereas', 'which',
+]);
+
+const CONTINUATION_CONJUNCTIONS = new Set([
+  'and', 'but', 'or', 'so', 'because', 'although', 'though', 'which', 'while', 'whereas', 'unless', 'until',
+]);
+
+const SENTENCE_STARTERS = new Set([
+  'i', "i'm", "i've", "i'll", "i'd", 'you', "you're", "you've", "you'll", 'we', "we're", "we've",
+  'they', "they're", 'he', "he's", 'she', "she's", 'it', "it's", 'this', 'that', "that's",
+  'there', "there's", 'here', "here's", 'now', 'then', 'so', 'well', 'today', 'yesterday',
+  'tomorrow', 'actually', 'basically', 'honestly', 'however', 'therefore', 'meanwhile',
+  'first', 'second', 'third', 'finally', 'next', 'please', 'thank', 'thanks', 'welcome',
+  'what', "what's", 'why', 'how', 'where', 'when', 'who', 'do', 'did', 'does', 'can', 'could',
+  'would', 'will', 'have', 'has', 'are', 'is', 'let', "let's", 'imagine', 'think', 'remember',
+  'look', 'listen', 'wait', 'okay', 'yes', 'no', 'never', 'always', 'sometimes', 'everyone',
+]);
+
+const INTRO_SINGLE_COMMA = new Set([
+  'actually', 'basically', 'honestly', 'frankly', 'obviously', 'apparently', 'fortunately',
+  'unfortunately', 'personally', 'generally', 'typically', 'normally', 'usually', 'interestingly',
+  'surprisingly', 'importantly', 'meanwhile', 'however', 'therefore', 'furthermore', 'moreover',
+  'instead', 'otherwise', 'finally', 'eventually', 'suddenly', 'first', 'second', 'third',
+  'well', 'okay', 'anyway', 'anyways', 'wait', 'listen',
+]);
+
+const PROPER_NOUN_MAP: Record<string, string> = {
+  i: 'I',
+  "i'm": "I'm",
+  "i've": "I've",
+  "i'll": "I'll",
+  "i'd": "I'd",
+  english: 'English',
+  ukrainian: 'Ukrainian',
+  american: 'American',
+  british: 'British',
+  youtube: 'YouTube',
+  google: 'Google',
+  instagram: 'Instagram',
+  tiktok: 'TikTok',
+  netflix: 'Netflix',
+  monday: 'Monday',
+  tuesday: 'Tuesday',
+  wednesday: 'Wednesday',
+  thursday: 'Thursday',
+  friday: 'Friday',
+  saturday: 'Saturday',
+  sunday: 'Sunday',
+  january: 'January',
+  february: 'February',
+  april: 'April',
+  june: 'June',
+  july: 'July',
+  august: 'August',
+  september: 'September',
+  october: 'October',
+  november: 'November',
+  december: 'December',
+};
+
+function cleanReadingSegmentText(text: string): string {
+  return text
+    .replace(READING_NOISE_TAG_RE, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+export function transcriptNeedsPunctuation(segments: SubtitleSegment[]): boolean {
+  if (!segments.length) return false;
+  let totalWords = 0;
+  let punctCount = 0;
+  for (const seg of segments) {
+    const cleaned = cleanReadingSegmentText(seg.text);
+    if (!cleaned) continue;
+    totalWords += cleaned.split(/\s+/).length;
+    const matches = cleaned.match(/[.!?,;:]/g);
+    if (matches) punctCount += matches.length;
+  }
+  if (totalWords < 12) return false;
+  // Auto-generated YouTube captions typically have ~0 punctuation marks across hundreds of words
+  return punctCount / totalWords < 0.025;
+}
+
+function capitalizeToken(word: string): string {
+  if (!word) return word;
+  return word.replace(/^([^A-Za-z]*)([a-z])/, (_, prefix, ch) => prefix + ch.toUpperCase());
+}
+
+function fixTokenCapitalization(word: string): string {
+  const norm = word.replace(/’/g, "'").toLowerCase();
+  if (PROPER_NOUN_MAP[norm]) return PROPER_NOUN_MAP[norm];
+  return word;
+}
+
+function isLikelyQuestion(sentenceWords: string[]): boolean {
+  if (sentenceWords.length < 3 || sentenceWords.length > 26) return false;
+  const w0 = sentenceWords[0].replace(/’/g, "'").toLowerCase().replace(/[^a-z']/g, '');
+  const w1 = (sentenceWords[1] || '').replace(/’/g, "'").toLowerCase().replace(/[^a-z']/g, '');
+  const last = sentenceWords[sentenceWords.length - 1]
+    .replace(/’/g, "'")
+    .toLowerCase()
+    .replace(/[^a-z']/g, '');
+
+  if (last === 'right' && sentenceWords.length >= 4) return true;
+
+  const auxVerbs = new Set([
+    'is', 'are', 'was', 'were', 'do', 'does', 'did', 'can', 'could', 'would', 'will',
+    'should', 'have', 'has', 'had', "don't", "doesn't", "didn't", "isn't", "aren't", "won't", "can't",
+  ]);
+  const whStarters = new Set(['what', "what's", 'why', 'how', 'where', 'when', 'who', "who's", 'which']);
+  const subjPronouns = new Set(['you', 'we', 'they', 'he', 'she', 'it', 'i', 'this', 'that', 'there']);
+
+  if (whStarters.has(w0) && (auxVerbs.has(w1) || w0.endsWith("'s") || (w0 === 'how' && ['many', 'much', 'long', 'far', 'often', 'come', 'about'].includes(w1)))) {
+    return true;
+  }
+  if (auxVerbs.has(w0) && subjPronouns.has(w1)) {
+    return true;
+  }
+  return false;
+}
+
+function applyPostPunctuationPolish(paragraph: string): string {
+  let out = paragraph;
+
+  // Multi-word discourse expressions at start of sentence -> add comma after them
+  out = out.replace(
+    /(^|[.!?]\s+)(By the way|In fact|For example|For instance|Of course|On the other hand|At the end of the day|First of all|After all|To be honest|As a result|Truth be told|Believe it or not|In other words|You know|I mean)(?!,)\s+(?=[A-Za-z])/g,
+    '$1$2, '
+  );
+
+  // Single-word sentence-initial discourse adverbs -> add comma if followed by subject/clause
+  out = out.replace(
+    /(^|[.!?]\s+)([A-Z][a-z]+)\s+(?=(?:I|I'm|I've|I'll|I'd|you|we|they|he|she|it|this|that|there|here|the|a|an|my|our|your|in|if|when)\b)/g,
+    (match, prefix, word) => {
+      if (INTRO_SINGLE_COMMA.has(word.toLowerCase())) {
+        return `${prefix}${word}, `;
+      }
+      return match;
+    }
+  );
+
+  // Clean up any accidental double punctuation or stray spaces before punctuation
+  out = out
+    .replace(/\s+([.!?,;:])/g, '$1')
+    .replace(/,\s*([.!?])/g, '$1')
+    .replace(/([.!?]){2,}/g, '$1')
+    .replace(/\s+/g, ' ')
+    .trim();
+
+  // Ensure every sentence starts with a capital letter
+  out = out.replace(/(^|[.!?]\s+)([a-z])/g, (_, p, ch) => p + ch.toUpperCase());
+
+  // Ensure paragraph ends with terminal punctuation
+  if (out && !/[.!?]["'”)\]]*$/.test(out)) {
+    out += '.';
+  }
+
+  return out;
+}
+
+interface TimedReadingWord {
+  text: string;
+  norm: string;
+  start: number;
+  end: number;
+}
+
+function buildPunctuatedParagraphsFromAsr(segments: SubtitleSegment[]): string[] {
+  // Flatten all spoken words with their real timestamps from segments + wordTimings
+  const stream: TimedReadingWord[] = [];
+
+  for (const seg of segments) {
+    const cleaned = cleanReadingSegmentText(seg.text);
+    if (!cleaned) continue;
+
+    const rawTokens = cleaned.split(/\s+/).filter(Boolean);
+    const wordTimings = seg.wordTimings || [];
+    let wtIdx = 0;
+
+    for (let i = 0; i < rawTokens.length; i++) {
+      const tok = rawTokens[i];
+      const hasAlpha = /[A-Za-z]/.test(tok);
+      const fracStart = seg.start + (i / rawTokens.length) * Math.max(0.2, seg.end - seg.start);
+      const fracEnd = seg.start + ((i + 1) / rawTokens.length) * Math.max(0.2, seg.end - seg.start);
+
+      let wStart = fracStart;
+      let wEnd = fracEnd;
+      if (hasAlpha && wtIdx < wordTimings.length) {
+        wStart = wordTimings[wtIdx].start;
+        wEnd = wordTimings[wtIdx].end;
+        // Advance wtIdx by how many WORD_REGEX tokens this whitespace token contains (e.g. "stanford.edu" has 2)
+        const subCount = (tok.match(/[A-Za-z]+(?:['’-][A-Za-z]+)*/g) || []).length;
+        wtIdx += Math.max(1, subCount);
+      }
+
+      const fixed = fixTokenCapitalization(tok);
+      stream.push({
+        text: fixed,
+        norm: fixed.replace(/’/g, "'").replace(/^[^a-zA-Z']+|[^a-zA-Z']+$/g, '').toLowerCase(),
+        start: wStart,
+        end: wEnd,
+      });
+    }
+  }
+
+  if (stream.length === 0) return [];
+
+  const paragraphs: string[] = [];
+  let curParagraphTokens: string[] = [];
+  let curSentenceWords: string[] = [];
+  let paragraphWordCount = 0;
+  let wordsSinceComma = 0;
+
+  const finalizeSentence = (mark?: '.' | '?') => {
+    if (curSentenceWords.length === 0) return;
+    const endMark = mark || (isLikelyQuestion(curSentenceWords) ? '?' : '.');
+    const lastIdx = curSentenceWords.length - 1;
+    curSentenceWords[0] = capitalizeToken(curSentenceWords[0]);
+    if (!/[.!?]$/.test(curSentenceWords[lastIdx])) {
+      curSentenceWords[lastIdx] = curSentenceWords[lastIdx].replace(/[,;:]+$/, '') + endMark;
+    }
+    curParagraphTokens.push(...curSentenceWords);
+    curSentenceWords = [];
+    wordsSinceComma = 0;
+  };
+
+  const flushParagraph = () => {
+    finalizeSentence();
+    if (curParagraphTokens.length > 0) {
+      paragraphs.push(applyPostPunctuationPolish(curParagraphTokens.join(' ')));
+      curParagraphTokens = [];
+      paragraphWordCount = 0;
+    }
+  };
+
+  for (let i = 0; i < stream.length; i++) {
+    const cur = stream[i];
+    const next = i + 1 < stream.length ? stream[i + 1] : null;
+
+    // Add comma BEFORE contrastive conjunctions like "but", "however", "although", "which"
+    if (
+      curSentenceWords.length >= 5 &&
+      wordsSinceComma >= 4 &&
+      CONJUNCTION_COMMA_BEFORE.has(cur.norm) &&
+      !NO_BREAK_AFTER_WORDS.has(
+        curSentenceWords[curSentenceWords.length - 1]
+          .replace(/’/g, "'")
+          .replace(/[^a-z']/gi, '')
+          .toLowerCase()
+      ) &&
+      !/[,;:.!?]$/.test(curSentenceWords[curSentenceWords.length - 1])
+    ) {
+      curSentenceWords[curSentenceWords.length - 1] += ',';
+      wordsSinceComma = 0;
+    }
+
+    curSentenceWords.push(cur.text);
+    paragraphWordCount++;
+    wordsSinceComma++;
+
+    if (!next) break;
+
+    // Estimate true acoustic silence after `cur` (inter-onset interval minus estimated spoken duration)
+    const interOnsetGap = Math.max(0, next.start - cur.start);
+    const spokenEst = Math.min(0.62, 0.13 + cur.norm.length * 0.046);
+    const silenceAfter = Math.max(0, interOnsetGap - spokenEst);
+
+    const canBreakAfterCur =
+      cur.norm.length > 0 &&
+      !NO_BREAK_AFTER_WORDS.has(cur.norm) &&
+      !/[.!?,;:]$/.test(cur.text);
+
+    const nextIsConj = CONTINUATION_CONJUNCTIONS.has(next.norm);
+    const nextIsStarter = SENTENCE_STARTERS.has(next.norm);
+    const nextBlocksSentenceStart = NO_SENTENCE_START_WORDS.has(next.norm);
+    const nextBlocksComma = NO_COMMA_BEFORE_WORDS.has(next.norm);
+    const sentLen = curSentenceWords.length;
+
+    // 1. Long silence (>= 1.8s) -> sentence end + paragraph break only if next word can start a sentence
+    if (canBreakAfterCur && !nextBlocksSentenceStart && silenceAfter >= 1.8 && sentLen >= 2) {
+      if (paragraphWordCount >= 18) {
+        flushParagraph();
+      } else {
+        finalizeSentence();
+      }
+      continue;
+    }
+
+    // 2. Medium-strong pause (>= 0.45s)
+    if (canBreakAfterCur && silenceAfter >= 0.45) {
+      if ((nextIsConj || next.norm === 'who' || next.norm === 'which') && sentLen >= 4) {
+        // Pause before "and / but / so / because / who / which" -> natural comma!
+        curSentenceWords[curSentenceWords.length - 1] += ',';
+        wordsSinceComma = 0;
+      } else if (
+        !nextBlocksSentenceStart &&
+        ((sentLen >= 5 && (nextIsStarter || silenceAfter >= 0.6)) ||
+          (sentLen >= 2 && silenceAfter >= 0.65 && nextIsStarter))
+      ) {
+        finalizeSentence();
+        if (paragraphWordCount >= 52) {
+          flushParagraph();
+        }
+      } else if (
+        !nextBlocksComma &&
+        sentLen >= 1 &&
+        sentLen <= 4 &&
+        silenceAfter >= 0.5 &&
+        nextIsStarter
+      ) {
+        // Short intro phrase followed by a noticeable pause (e.g. "Truth be told,", "Today,")
+        curSentenceWords[curSentenceWords.length - 1] += ',';
+        wordsSinceComma = 0;
+      }
+      continue;
+    }
+
+    // 3. Moderate breath pause (>= 0.28s) + strong sentence starter after decent sentence length
+    if (
+      canBreakAfterCur &&
+      !nextBlocksSentenceStart &&
+      silenceAfter >= 0.28 &&
+      sentLen >= 8 &&
+      nextIsStarter &&
+      !nextIsConj
+    ) {
+      finalizeSentence();
+      if (paragraphWordCount >= 52) {
+        flushParagraph();
+      }
+      continue;
+    }
+
+    // 4. Prevent overly long run-on sentences when speaker talks non-stop without long pauses
+    if (
+      canBreakAfterCur &&
+      !nextBlocksSentenceStart &&
+      sentLen >= 17 &&
+      nextIsStarter &&
+      !nextIsConj
+    ) {
+      finalizeSentence();
+      if (paragraphWordCount >= 55) {
+        flushParagraph();
+      }
+      continue;
+    }
+
+    if (canBreakAfterCur && !nextBlocksSentenceStart && sentLen >= 26) {
+      finalizeSentence();
+      if (paragraphWordCount >= 55) {
+        flushParagraph();
+      }
+    }
+  }
+
+  flushParagraph();
+  return paragraphs;
+}
+
 export function groupSegmentsIntoParagraphs(segments: SubtitleSegment[]): string[] {
   if (!segments.length) return [];
+
+  // Auto-generated captions lack punctuation & capitalization -> restore them cleanly using
+  // real speech pauses and English grammar rules so Reading Mode is pleasant to read!
+  if (transcriptNeedsPunctuation(segments)) {
+    return buildPunctuatedParagraphsFromAsr(segments);
+  }
 
   const paragraphs: string[] = [];
   let current: string[] = [];
@@ -41,17 +442,20 @@ export function groupSegmentsIntoParagraphs(segments: SubtitleSegment[]): string
 
   for (let i = 0; i < segments.length; i++) {
     const seg = segments[i];
+    const cleaned = cleanReadingSegmentText(seg.text);
+    if (!cleaned) continue;
+
     const prev = i > 0 ? segments[i - 1] : null;
     const pauseGap = prev ? seg.start - prev.end : 0;
 
-    current.push(seg.text.trim());
-    wordCount += seg.text.trim().split(/\s+/).length;
+    current.push(cleaned);
+    wordCount += cleaned.split(/\s+/).length;
 
-    const endsWithPunctuation = /[.!?]["']?$/.test(seg.text.trim());
+    const endsWithPunctuation = /[.!?]["'”)\]]*$/.test(cleaned);
     const shouldBreak =
       (wordCount >= 45 && endsWithPunctuation) ||
       wordCount >= 75 ||
-      (pauseGap >= 2.8 && wordCount >= 18);
+      (pauseGap >= 2.8 && wordCount >= 18 && endsWithPunctuation);
 
     if (shouldBreak) {
       paragraphs.push(current.join(' ').replace(/\s+/g, ' ').trim());
