@@ -45,7 +45,7 @@ export const FlashcardsView: React.FC<FlashcardsViewProps> = ({
   const [showAddForm, setShowAddForm] = useState(false);
   const [newWord, setNewWord] = useState('');
   const [newTranslation, setNewTranslation] = useState('');
-  const [newContext, setNewContext] = useState('');
+  const [newAlternatives, setNewAlternatives] = useState('');
 
   // Touch swipe tracking for iPhone 13
   const touchStartX = useRef<number | null>(null);
@@ -139,10 +139,10 @@ export const FlashcardsView: React.FC<FlashcardsViewProps> = ({
   const handleManualSubmit = (e: React.FormEvent) => {
     e.preventDefault();
     if (!newWord.trim() || !newTranslation.trim()) return;
-    onAddManualCard(newWord, newTranslation, newContext);
+    onAddManualCard(newWord, newTranslation, newAlternatives);
     setNewWord('');
     setNewTranslation('');
-    setNewContext('');
+    setNewAlternatives('');
     setShowAddForm(false);
   };
 
@@ -345,18 +345,15 @@ export const FlashcardsView: React.FC<FlashcardsViewProps> = ({
                     <div className="flashcard__center">
                       <div className="flashcard__translation">{activeCard.translation}</div>
                       {activeCard.alternatives.length > 0 && (
-                        <div className="flashcard__alts">
-                          {activeCard.alternatives.slice(0, 3).join(' · ')}
-                        </div>
-                      )}
-                      {activeCard.context && (
-                        <div className="flashcard__context">
-                          <div className="flashcard__context-en">«{activeCard.context}»</div>
-                          {activeCard.contextTranslation && (
-                            <div className="flashcard__context-uk">
-                              {activeCard.contextTranslation}
-                            </div>
-                          )}
+                        <div className="flashcard__alts-block">
+                          <div className="flashcard__alts-label">Інші можливі переклади</div>
+                          <div className="flashcard__alts-chips">
+                            {activeCard.alternatives.slice(0, 6).map((alt) => (
+                              <span key={alt} className="flashcard__alt-chip">
+                                {alt}
+                              </span>
+                            ))}
+                          </div>
                         </div>
                       )}
                     </div>
@@ -433,9 +430,9 @@ export const FlashcardsView: React.FC<FlashcardsViewProps> = ({
               <input
                 type="text"
                 className="text-input"
-                placeholder="Приклад речення (необовʼязково)"
-                value={newContext}
-                onChange={(e) => setNewContext(e.target.value)}
+                placeholder="Інші переклади через кому (необовʼязково)"
+                value={newAlternatives}
+                onChange={(e) => setNewAlternatives(e.target.value)}
               />
               <div className="manual-add-actions">
                 <button
@@ -464,8 +461,10 @@ export const FlashcardsView: React.FC<FlashcardsViewProps> = ({
                     {card.learned && <span className="badge badge--yellow">Вивчено</span>}
                   </div>
                   <div className="wordlist-item__tr">{card.translation}</div>
-                  {card.context && (
-                    <div className="wordlist-item__ctx">«{card.context}»</div>
+                  {card.alternatives.length > 0 && (
+                    <div className="wordlist-item__ctx">
+                      {card.alternatives.slice(0, 5).join(' · ')}
+                    </div>
                   )}
                 </div>
 

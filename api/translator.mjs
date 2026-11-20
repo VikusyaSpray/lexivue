@@ -626,7 +626,7 @@ function extractSmartGoogleWordData(gtResult, lower, inferredPos) {
     if (!t) return;
     if (t.toLowerCase() === mainTranslation.toLowerCase()) return;
     if (alternatives.some((a) => a.toLowerCase() === t.toLowerCase())) return;
-    if (alternatives.length < 4) alternatives.push(t);
+    if (alternatives.length < 5) alternatives.push(t);
   };
 
   // 1. Prefer neural-ranked alternatives from dt=at (gtResult[5]) — much cleaner than alphabetical dt=bd!
@@ -679,10 +679,10 @@ function extractSmartGoogleWordData(gtResult, lower, inferredPos) {
       partOfSpeech = pos;
       partOfSpeechUk = POS_UK[pos] || pos;
 
-      // Only pull extra alternatives from the CHOSEN (context-relevant) group if we still have < 3 alts
+      // Only pull extra alternatives from the CHOSEN (context-relevant) group if we still have < 5 alts
       const terms = Array.isArray(chosenGroup[1]) ? chosenGroup[1] : [];
       for (const term of terms) {
-        if (alternatives.length >= 3) break;
+        if (alternatives.length >= 5) break;
         pushAlt(term);
       }
     }
@@ -737,7 +737,7 @@ export async function translateWordEnhanced(rawWord, sentence = '') {
               a.toLowerCase() !== aiResult.translation.trim().toLowerCase() &&
               arr.findIndex((x) => x.toLowerCase() === a.toLowerCase()) === idx
           )
-          .slice(0, 4)
+          .slice(0, 5)
       : [];
 
     const detectedFallback =

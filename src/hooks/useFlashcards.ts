@@ -65,11 +65,21 @@ export function useFlashcards() {
   );
 
   const addManualCard = useCallback(
-    (word: string, translation: string, context?: string) => {
+    (word: string, translation: string, alternativesText?: string) => {
       const cleanWord = word.trim();
       const cleanTranslation = translation.trim();
       if (!cleanWord || !cleanTranslation) return;
       const normalized = cleanWord.toLowerCase();
+      const alternatives = (alternativesText || '')
+        .split(/[,;]+/)
+        .map((s) => s.trim())
+        .filter(
+          (s, idx, arr) =>
+            s &&
+            s.toLowerCase() !== cleanTranslation.toLowerCase() &&
+            arr.findIndex((x) => x.toLowerCase() === s.toLowerCase()) === idx
+        )
+        .slice(0, 6);
       setCards((prev) => {
         if (prev.some((c) => c.normalized === normalized)) return prev;
         const newCard: Flashcard = {
@@ -77,8 +87,7 @@ export function useFlashcards() {
           word: cleanWord,
           normalized,
           translation: cleanTranslation,
-          alternatives: [],
-          context: context?.trim() || undefined,
+          alternatives,
           sourceTitle: 'Додано вручну',
           learned: false,
           createdAt: Date.now(),
