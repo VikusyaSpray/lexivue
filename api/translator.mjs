@@ -448,15 +448,19 @@ function buildAiPrompt(word, sentence) {
     `Цільове слово: "${word}"`,
     hasSentence ? `Контекст (речення): "${sentence}"` : 'Контекст: немає (окреме слово).',
     '',
+    'Правила:',
+    '- Перекладай сучасною, природною українською мовою без русизмів і застарілих словникових значень.',
+    '- Якщо цільове слово входить у сталий вираз, ідіому чи фразове дієслово у цьому реченні (наприклад break a leg, at the end of the day, figure out, take for granted, piece of cake), заповни поля phrase, phraseTranslation і phraseNote, А ТАКОЖ обовʼязково використай цей природний небуквальний переклад ідіоми всередині sentenceTranslation (НЕ перекладай ідіому дослівно в реченні!).',
+    '',
     'Поверни ТІЛЬКИ валідний JSON без markdown-обгортки з такими полями:',
     '{',
-    '  "translation": "найточніший сучасний український переклад слова САМЕ в цьому контексті (1-3 слова, без русизмів і застарілих значень)",',
-    '  "alternatives": ["2-4 природних українських варіанти перекладу або близькі значення"],',
-    '  "partOfSpeechUk": "частина мови українською саме в цьому реченні (наприклад: дієслово, іменник, прикметник, прислівник, модальне дієслово, прийменник, сполучник)",',
-    '  "phrase": "якщо цільове слово в цьому реченні є частиною сталого виразу, ідіоми чи фразового дієслова (наприклад break a leg, at the end of the day, figure out, take for granted), випиши цей вираз англійською; інакше порожній рядок",',
-    '  "phraseTranslation": "природний український відповідник цього сталого виразу (НЕ дослівний переклад), або порожній рядок якщо phrase порожній",',
+    '  "translation": "найточніший сучасний український переклад слова САМЕ в цьому контексті (1-3 слова)",',
+    '  "alternatives": ["3-5 інших природних українських значень або синонімів цього слова"],',
+    '  "partOfSpeechUk": "одна частина мови українською саме в цьому реченні (дієслово, іменник, прикметник, прислівник, модальне дієслово, допоміжне дієслово, прийменник, сполучник, займенник, вигук)",',
+    '  "phrase": "англійський сталий вираз або фразове дієслово з цього речення, якщо слово є його частиною; інакше порожній рядок",',
+    '  "phraseTranslation": "природний український відповідник цього сталого виразу (НЕ дослівний), або порожній рядок якщо phrase порожній",',
     '  "phraseNote": "сталий вираз або фразове дієслово (або порожній рядок якщо phrase порожній)",',
-    '  "sentenceTranslation": "природний, живий український переклад усього речення з урахуванням ідіом (або порожній рядок якщо контексту немає)"',
+    '  "sentenceTranslation": "природний, живий український переклад усього речення з обовʼязковим урахуванням ідіом і сталих виразів (або порожній рядок якщо контексту немає)"',
     '}',
   ].join('\n');
 }
@@ -487,6 +491,7 @@ async function translateViaGemini(word, sentence) {
 
   const models = [
     process.env.GEMINI_MODEL || 'gemini-2.5-flash-lite',
+    'gemini-2.5-flash',
     'gemini-2.0-flash',
   ].filter((v, i, a) => v && a.indexOf(v) === i);
 
@@ -498,16 +503,21 @@ async function translateViaGemini(word, sentence) {
         model
       )}:generateContent?key=${encodeURIComponent(apiKey)}`;
 
+      const generationConfig = {
+        temperature: 0.1,
+        maxOutputTokens: 512,
+        responseMimeType: 'application/json',
+      };
+      if (model.includes('2.5')) {
+        generationConfig.thinkingConfig = { thinkingBudget: 0 };
+      }
+
       const res = await fetchWithTimeout(url, 6500, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           contents: [{ role: 'user', parts: [{ text: prompt }] }],
-          generationConfig: {
-            temperature: 0.1,
-            maxOutputTokens: 320,
-            responseMimeType: 'application/json',
-          },
+          generationConfig,
         }),
       });
       if (!res.ok) continue;
@@ -538,7 +548,7 @@ async function translateViaOpenAiCompatible({ url, apiKey, model, word, sentence
       body: JSON.stringify({
         model,
         temperature: 0.1,
-        max_tokens: 320,
+        max_tokens: 512,
         response_format: { type: 'json_object' },
         messages: [
           {
