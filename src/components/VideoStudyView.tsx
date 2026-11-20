@@ -172,6 +172,13 @@ export const VideoStudyView: React.FC<VideoStudyViewProps> = ({
     fallbackText: string,
     wordIdx?: number
   ) => {
+    if (transcript && segIndex >= 0 && prefetchChunks.length > 0) {
+      const segTime = transcript.segments[segIndex]?.start ?? 0;
+      const targetChunk = prefetchChunks.find((c) => segTime <= c.endSec + 1);
+      if (targetChunk) {
+        onPrefetchChunk(targetChunk.chunkIndex);
+      }
+    }
     const context =
       transcript && segIndex >= 0
         ? buildContextSentenceAroundSegment(transcript.segments, segIndex, word, wordIdx)

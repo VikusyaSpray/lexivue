@@ -966,28 +966,67 @@ export async function translateWordEnhanced(rawWord, sentence = '', options = {}
 const chunkPrefetchCache = new Map();
 const MAX_CHUNK_CACHE = 120;
 
-function buildBatchPrefetchPrompt(sentences) {
+const PREFETCH_STOPWORDS = new Set([
+  'the', 'a', 'an', 'is', 'are', 'was', 'were', 'am', 'be', 'been', 'being',
+  'to', 'of', 'in', 'on', 'at', 'for', 'with', 'from', 'by', 'as', 'into', 'about',
+  'and', 'or', 'but', 'if', 'so', 'nor', 'yet', 'that', 'this', 'these', 'those',
+  'i', 'you', 'he', 'she', 'it', 'we', 'they', 'me', 'him', 'her', 'us', 'them',
+  'my', 'your', 'his', 'its', 'our', 'their', 'do', 'does', 'did', 'have', 'has', 'had',
+  'not', 'no', 'yes', 'oh', 'uh', 'um', 'ah', 'hey', 'hi', 'ok', 'okay',
+  "i'm", "you're", "he's", "she's", "it's", "we're", "they're", "that's", "there's",
+  "don't", "doesn't", "didn't", "won't", "can't", "isn't", "aren't", "wasn't", "weren't",
+  "i've", "you've", "we've", "they've", "i'll", "you'll", "we'll", "i'd", "you'd",
+  'will', 'would', 'can', 'could', 'should', 'must', 'may', 'might',
+  'what', 'when', 'where', 'which', 'who', 'whom', 'whose', 'why', 'how',
+  'there', 'here', 'then', 'than', 'just', 'very', 'also', 'only', 'some', 'any',
+  'all', 'both', 'each', 'more', 'most', 'much', 'many', 'such', 'too', 'now',
+  'up', 'out', 'off', 'over', 'down', 'back', 'because', 'before', 'after', 'while',
+]);
+
+function extractUniqueContentWords(sentences, maxWords = 65) {
+  const seen = new Set();
+  const list = [];
+  const wordRe = /[A-Za-z]+(?:['’-][A-Za-z]+)*/g;
+  for (const s of sentences) {
+    wordRe.lastIndex = 0;
+    let m;
+    while ((m = wordRe.exec(s.text)) !== null) {
+      const norm = m[0].replace(/’/g, "'").toLowerCase();
+      if (norm.length < 2 || PREFETCH_STOPWORDS.has(norm) || seen.has(norm)) continue;
+      seen.add(norm);
+      list.push(norm);
+      if (list.length >= maxWords) return list;
+    }
+  }
+  return list;
+}
+
+function buildBatchPrefetchPrompt(sentences, targetWords) {
   const numbered = sentences.map((s) => `${s.id}: ${s.text}`).join('\n');
   return [
     'Ти — професійний англо-український словник і перекладач субтитрів для українців.',
-    'Нижче — уривок субтитрів з YouTube (пронумеровані речення):',
+    'Уривок субтитрів з YouTube:',
     numbered,
+    '',
+    targetWords.length > 0
+      ? `Список слів для словника (${targetWords.length} шт.): ${targetWords.join(', ')}`
+      : '',
     '',
     'Поверни ТІЛЬКИ валідний JSON без markdown-обгортки з 3 полями:',
     '{',
-    '  "sentences": { "<id>": "природний український переклад речення (ІДІОМИ всередині перекладай за змістом, наприклад break a leg -> ні пуху ні пера, НЕ зламай ногу!)" },',
+    '  "sentences": { "<id>": "природний український переклад речення (ІДІОМИ перекладай за змістом, напр. break a leg -> ні пуху ні пера, НЕ зламай ногу!)" },',
     '  "idioms": [',
     '    { "sentenceId": 0, "phrase": "точний сталий вираз або фразове дієслово з тексту", "translation": "природний український відповідник", "note": "сталий вираз або фразове дієслово" }',
     '  ],',
     '  "words": {',
-    '    "english_word_lowercase": { "tr": "точний переклад у цьому контексті (1-3 слова)", "alts": ["2-3 інші природні українські значення"], "pos": "частина мови українською" }',
+    '    "word": { "tr": "точний переклад у цьому контексті (1-3 слова)", "alts": ["2-3 інші природні значення"], "pos": "частина мови українською" }',
     '  }',
     '}',
     '',
     'Правила:',
-    '- У "sentences" переклади КОЖНЕ речення за id. Якщо в реченні є ідіома (наприклад break a leg, beat around the bush, take for granted), у самому перекладі речення ОБОВʼЯЗКОВО використай її справжнє значення українською (ні пуху ні пера, ходити манівцями, сприймати як належне), а НЕ дослівний переклад.',
+    '- У "sentences" переклади КОЖНЕ пронумероване речення. Якщо в реченні є ідіома, вбудуй її справжнє значення в переклад речення.',
     '- У "idioms" випиши лише реальні ідіоми, сталі вирази та фразові дієслова (або []).',
-    '- У "words" додай 10-22 найцікавіших змістових англійських слів із цього уривку (дієслова, іменники, прикметники, прислівники; пропускай базові the, a, an, is, are, to, of, in, on, at, and, or, you, I, it, that, this, for, with). Ключі — слова в нижньому регістрі точно як у тексті.',
+    '- У "words" ОБОВʼЯЗКОВО додай переклад для КОЖНОГО слова зі списку вище (ключ точно як у списку, в нижньому регістрі).',
   ].join('\n');
 }
 
@@ -1009,7 +1048,7 @@ async function callAiBatchJson(prompt) {
           )}:generateContent?key=${encodeURIComponent(geminiKey)}`;
           const generationConfig = {
             temperature: 0.1,
-            maxOutputTokens: 2800,
+            maxOutputTokens: 4200,
             responseMimeType: 'application/json',
           };
           if (disableThinking) {
@@ -1134,7 +1173,8 @@ export async function prefetchChunkTranslations(rawSentences = []) {
     };
   }
 
-  const parsed = await callAiBatchJson(buildBatchPrefetchPrompt(sentences));
+  const targetWords = extractUniqueContentWords(sentences, 65);
+  const parsed = await callAiBatchJson(buildBatchPrefetchPrompt(sentences, targetWords));
   if (!parsed) {
     return {
       status: 200,

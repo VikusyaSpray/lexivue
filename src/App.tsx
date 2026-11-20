@@ -98,11 +98,24 @@ export function App() {
     [transcript, prefetchChunks]
   );
 
-  // Start prefetching Chunk 0 in background as soon as a video loads
+  // Start prefetching Chunk 0 immediately, then automatically prefetch Chunk 1 right behind it
+  // so the first ~20 full sentences (~25-30 subtitle rows) are all instant 0ms clicks!
   useEffect(() => {
     if (!transcript || prefetchChunks.length === 0) return;
-    handlePrefetchChunk(0);
-  }, [transcript, prefetchChunks, handlePrefetchChunk]);
+    let cancelled = false;
+    void prefetchVideoChunkIfNeeded(transcript.videoId, prefetchChunks[0], () => {
+      if (!cancelled) setPrefetchRevision((r) => r + 1);
+    }).then(() => {
+      if (!cancelled && prefetchChunks.length > 1) {
+        void prefetchVideoChunkIfNeeded(transcript.videoId, prefetchChunks[1], () => {
+          if (!cancelled) setPrefetchRevision((r) => r + 1);
+        });
+      }
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [transcript, prefetchChunks]);
 
   const highlightedPhrases = useMemo(() => {
     void prefetchRevision;
